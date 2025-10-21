@@ -82,27 +82,26 @@ jobs:
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
 
-          > recent_prod.ps1 (
-            echo $ErrorActionPreference = 'Stop'
-            echo $server = '%H%,%PORT%'
-            echo $qry = @'
-            echo SET NOCOUNT ON;
+          rem --- tulis query ke file .sql (aman dari here-string) ---
+          > recent.sql (
+            echo SET NOCOUNT ON^;
             echo SELECT TOP (50)
-            echo   s.name + '.' + t.name AS table_name,
-            echo   t.create_date,
+            echo   s.name + '.' + t.name AS table_name^,
+            echo   t.create_date^,
             echo   t.modify_date
             echo FROM sys.tables t
             echo JOIN sys.schemas s ON s.schema_id = t.schema_id
-            echo WHERE t.create_date ^>= DATEADD(MINUTE, -60, SYSUTCDATETIME())
-            echo    OR t.modify_date ^>= DATEADD(MINUTE, -60, SYSUTCDATETIME())
-            echo ORDER BY t.modify_date DESC, t.create_date DESC;
-            echo '@
-            echo $base2 = @('-S',$server,'-d','%D%','-l','20','-b','-C','-h','-1','-W','-s',' ^| ','-Q',$qry)
-            echo $args2 = $base2 + @('-U','%U%','-P','%W%')
-            echo try { ^& $env:SQLCMD_EXE @args2 ^| Out-File -Append deploy-summary.md -Encoding utf8 }
-            echo catch { '_(No recent changes or query failed)_' ^| Out-File -Append deploy-summary.md -Encoding utf8 }
+            echo WHERE t.create_date ^>= DATEADD(MINUTE, -60, SYSUTCDATETIME(^))
+            echo    OR t.modify_date ^>= DATEADD(MINUTE, -60, SYSUTCDATETIME(^))
+            echo ORDER BY t.modify_date DESC^, t.create_date DESC^;
           )
-          powershell -NoProfile -ExecutionPolicy Bypass -File recent_prod.ps1
+
+          rem --- jalankan sqlcmd dan append ke summary ---
+          "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -h -1 -W -s " | " -i recent.sql >> deploy-summary.md 2>nul
+          if errorlevel 1 (
+            echo _(No recent changes or query failed)_>>deploy-summary.md
+          )
+
 
       - name: Upload deploy summary
         uses: actions/upload-artifact@v4
