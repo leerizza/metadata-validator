@@ -8,20 +8,30 @@ on:
         required: false
         default: "false"
 
+defaults:
+  run:
+    shell: powershell
+
 jobs:
   probe:
-    runs-on: [self-hosted, Windows]   # atau label custom milikmu
+    runs-on: [self-hosted, Windows]
     environment: staging
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Allow PowerShell scripts for this job
+        run: |
+          Write-Host "Before:"; Get-ExecutionPolicy -List
+          Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+          Write-Host "After:"; Get-ExecutionPolicy -List
+
       - name: Tool check (sqlcmd)
-        shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           sqlcmd -? | Out-Null
           Write-Host "sqlcmd OK"
 
       - name: DNS resolve
-        shell: powershell
         env:
           H: ${{ secrets.STG_DB_HOST }}
         run: |
@@ -30,7 +40,6 @@ jobs:
           try { Resolve-DnsName $env:H -ErrorAction Stop | Select-Object -First 3 | Format-Table } catch { Write-Host "DNS resolve gagal: $($_.Exception.Message)" }
 
       - name: TCP port check
-        shell: powershell
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
@@ -44,7 +53,6 @@ jobs:
           Write-Host "TCP OK"
 
       - name: Try sqlcmd login (SELECT 1)
-        shell: powershell
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
@@ -58,7 +66,7 @@ jobs:
           if ($port -notmatch '^\d+$') { throw "STG_DB_PORT invalid: '$port'" }
 
           $server = "$($env:H),$port"
-          $baseArgs = @("-S", $server, "-d", $env:D, "-l", "10", "-b", "-C")  # -C: trust server cert
+          $baseArgs = @("-S", $server, "-d", $env:D, "-l", "10", "-b", "-C")  # -C trust server cert
           if ($useIntegrated) {
             $args = $baseArgs + "-E"
           } else {
