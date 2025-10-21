@@ -23,31 +23,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Ensure sqlcmd is available (detect or install)
+      - name: Use sqlcmd path from repo variable
         run: >
-          powershell -ExecutionPolicy Bypass -NoProfile -Command
-          "$ErrorActionPreference='Stop';
-           $exe=$null;
-           $pref='${{ vars.SQLCMD_EXE }}'; if($pref -and (Test-Path $pref)){ $exe=$pref };
-           if(-not $exe){ $exe=(Get-Command sqlcmd -ErrorAction SilentlyContinue).Source };
-           if(-not $exe){
-             $paths=@(
-               (Join-Path $env:ProgramFiles 'Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe'),
-               (Join-Path $env:ProgramFiles 'Microsoft SQL Server\160\Tools\Binn\sqlcmd.exe'),
-               (Join-Path $env:ProgramFiles 'Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe')
-             ); $exe = $paths | ? { Test-Path $_ } | Select-Object -First 1
-           };
-           if(-not $exe){
-             try { winget install Microsoft.SQLServer.CommandLineTools --accept-package-agreements --accept-source-agreements -h 0 } catch { Write-Host 'winget blocked/failed'; };
-             $exe=(Get-Command sqlcmd -ErrorAction SilentlyContinue).Source
-           };
-           if(-not $exe){ throw 'sqlcmd not found. Install the tools or set repo variable SQLCMD_EXE.' };
-           [IO.File]::AppendAllText($env:GITHUB_ENV,'SQLCMD_EXE='+$exe+\"`n\");
-           Write-Host ('Using sqlcmd: {0}' -f $exe)"
+          powershell -NoProfile -ExecutionPolicy Bypass -Command
+          "[IO.File]::AppendAllText($env:GITHUB_ENV,'SQLCMD_EXE=${{ vars.SQLCMD_EXE }}' + \"`n\");
+           if(-not (Test-Path '${{ vars.SQLCMD_EXE }}')){ Write-Host 'sqlcmd.exe not found at: ${{ vars.SQLCMD_EXE }}'; exit 1 }
+           else{ Write-Host 'Using sqlcmd: ${{ vars.SQLCMD_EXE }}' }"
 
       - name: Tool check (sqlcmd)
         run: >
-          powershell -ExecutionPolicy Bypass -NoProfile -Command
+          powershell -NoProfile -ExecutionPolicy Bypass -Command
           "$ErrorActionPreference='Stop'; & $env:SQLCMD_EXE -? | Out-Null; Write-Host 'sqlcmd OK'"
 
       - name: Deploy to PROD (deploy\*.sql sorted)
@@ -60,7 +45,7 @@ jobs:
           W: ${{ secrets.DB_PASSWORD }}
           USE_INTEGRATED_PROD: ${{ vars.USE_INTEGRATED_PROD }}   # "true"/"false"
         run: >
-          powershell -ExecutionPolicy Bypass -NoProfile -Command
+          powershell -NoProfile -ExecutionPolicy Bypass -Command
           "$ErrorActionPreference='Stop';
            if([string]::IsNullOrWhiteSpace($env:H)){ throw 'Secret DB_HOST kosong' };
            $port= if([string]::IsNullOrWhiteSpace($env:P)){'1433'} else {$env:P};
