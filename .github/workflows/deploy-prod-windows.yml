@@ -23,10 +23,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Ensure sqlcmd is available (detect or install)
+        run: |
+          where sqlcmd >NUL 2>&1 && (for /f "delims=" %%A in ('where sqlcmd') do (echo SQLCMD_EXE=%%A>>%GITHUB_ENV)) && goto :done_sqlcmd
+          powershell -ExecutionPolicy Bypass -NoProfile -Command ^
+            "$ErrorActionPreference='Stop';" ^
+            "$paths = @(" ^
+            "'$env:ProgramFiles\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\sqlcmd.exe'," ^
+            "'$env:ProgramFiles\\Microsoft SQL Server\\160\\Tools\\Binn\\sqlcmd.exe'," ^
+            "'$env:ProgramFiles\\Microsoft SQL Server\\150\\Tools\\Binn\\sqlcmd.exe'" ^
+            ");" ^
+            "$exe = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1;" ^
+            "if (-not $exe) {" ^
+            "  try { winget install Microsoft.SQLServer.CommandLineTools --accept-package-agreements --accept-source-agreements -h 0 } catch { Write-Host 'winget failed or blocked'; }" ^
+            "  $exe = (Get-Command sqlcmd -ErrorAction SilentlyContinue).Source" ^
+            "};" ^
+            "if (-not $exe) { throw 'sqlcmd not found. Install it on the runner.' };" ^
+            "[IO.File]::AppendAllText($env:GITHUB_ENV, 'SQLCMD_EXE=' + $exe + \"`n\");" ^
+            "Write-Host ('Using sqlcmd: {0}' -f $exe);"
+          :done_sqlcmd
+
       - name: Tool check (sqlcmd)
         run: >
-          powershell -ExecutionPolicy Bypass -Command
-          "$ErrorActionPreference='Stop'; sqlcmd -? | Out-Null; Write-Host 'sqlcmd OK'"
+          powershell -ExecutionPolicy Bypass -NoProfile -Command
+          "$ErrorActionPreference='Stop'; & $env:SQLCMD_EXE -? | Out-Null; Write-Host 'sqlcmd OK'"
 
       - name: Deploy to PROD (deploy\*.sql sorted)
         id: deploy
@@ -38,7 +58,7 @@ jobs:
           W: ${{ secrets.DB_PASSWORD }}
           USE_INTEGRATED_PROD: ${{ vars.USE_INTEGRATED_PROD }}   # "true"/"false"
         run: >
-          powershell -ExecutionPolicy Bypass -Command
+          powershell -ExecutionPolicy Bypass -NoProfile -Command
           "$ErrorActionPreference='Stop';
            if([string]::IsNullOrWhiteSpace($env:H)){ throw 'Secret DB_HOST kosong' };
            $port= if([string]::IsNullOrWhiteSpace($env:P)){'1433'} else {$env:P};
@@ -57,7 +77,7 @@ jobs:
                if([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)){ throw 'SQL Auth dipilih tapi DB_USER/PASSWORD kosong' }
                $args = $base + @('-U',$env:U,'-P',$env:W)
              }
-             & sqlcmd @args; if($LASTEXITCODE -ne 0){ throw ('sqlcmd failed on {0} with exit code {1}' -f $s.Name,$LASTEXITCODE) }
+             & $env:SQLCMD_EXE @args; if($LASTEXITCODE -ne 0){ throw ('sqlcmd failed on {0} with exit code {1}' -f $s.Name,$LASTEXITCODE) }
            }
            '`n**Recent objects (created/modified in last 60 minutes)**' | Out-File -Append deploy-summary.md -Encoding utf8;
            $qry = @'
@@ -74,7 +94,7 @@ jobs:
 '@;
            $base2 = @('-S',$server,'-d',$env:D,'-l','20','-b','-C','-h','-1','-W','-s',' | ','-Q',$qry);
            if(($env:USE_INTEGRATED_PROD).ToString().ToLower() -eq 'true'){ $args2 = $base2 + '-E' } else { $args2 = $base2 + @('-U',$env:U,'-P',$env:W) }
-           try { (& sqlcmd @args2) | Out-File -Append deploy-summary.md -Encoding utf8 } catch { '_(No recent changes or query failed)_' | Out-File -Append deploy-summary.md -Encoding utf8 }"
+           try { (& $env:SQLCMD_EXE @args2) | Out-File -Append deploy-summary.md -Encoding utf8 } catch { '_(No recent changes or query failed)_' | Out-File -Append deploy-summary.md -Encoding utf8 }"
 
       - name: Upload deploy summary
         uses: actions/upload-artifact@v4
