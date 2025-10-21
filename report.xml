@@ -1,0 +1,2 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="metadata-validator" tests="1"><testcase classname="validator" name="deploy.001_create_tables.sql"><failure message="1 violation(s)">- Terdeteksi tipe data terlarang: match `(?i)\b(varchar|nvarchar)\s*\(\s*max\s*\)`</failure></testcase></testsuite>

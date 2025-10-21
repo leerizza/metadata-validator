@@ -3,7 +3,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[di
 BEGIN
   CREATE TABLE [dbo].[dim_customer] (
     id INT NOT NULL PRIMARY KEY,
-    full_name VARCHAR(150) NOT NULL,
+    full_name VARCHAR(MAX) NOT NULL,
     email VARCHAR(200) NULL
   );
 END;
