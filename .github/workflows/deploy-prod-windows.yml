@@ -14,7 +14,7 @@ concurrency:
 
 defaults:
   run:
-    shell: powershell
+    shell: cmd
 
 jobs:
   deploy:
@@ -23,17 +23,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Allow PowerShell scripts for this job
-        run: |
-          Write-Host "Before:"; Get-ExecutionPolicy -List
-          Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
-          Write-Host "After:"; Get-ExecutionPolicy -List
-
       - name: Tool check (sqlcmd)
-        run: |
-          $ErrorActionPreference = "Stop"
-          sqlcmd -? | Out-Null
-          Write-Host "sqlcmd OK"
+        run: >
+          powershell -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop'; sqlcmd -? | Out-Null; Write-Host 'sqlcmd OK'"
 
       - name: Deploy to PROD (deploy\*.sql sorted)
         id: deploy
@@ -44,54 +37,44 @@ jobs:
           U: ${{ secrets.DB_USER }}
           W: ${{ secrets.DB_PASSWORD }}
           USE_INTEGRATED_PROD: ${{ vars.USE_INTEGRATED_PROD }}   # "true"/"false"
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          if ([string]::IsNullOrWhiteSpace($env:H)) { throw "Secret DB_HOST kosong" }
-          $port = if ([string]::IsNullOrWhiteSpace($env:P)) { "1433" } else { $env:P }
-          if ($port -notmatch '^\d+$') { throw "DB_PORT invalid: '$port'" }
-          $server = "$($env:H),$port"
-
-          $scripts = Get-ChildItem -Path "deploy" -Filter "*.sql" | Sort-Object Name
-          if (-not $scripts) {
-            "No SQL files in deploy/. Skipping PROD deploy." | Out-File -FilePath deploy-summary.md -Encoding utf8
-            exit 0
-          }
-
-          "## PROD Deploy`n" | Out-File -FilePath deploy-summary.md -Encoding utf8
-          "**Target:** $server/$($env:D)`n" | Out-File -Append deploy-summary.md -Encoding utf8
-          "**Executed files:**" | Out-File -Append deploy-summary.md -Encoding utf8
-
-          foreach ($s in $scripts) {
-            "- `$($s.FullName.Replace('\','/'))`" | Out-File -Append deploy-summary.md -Encoding utf8
-
-            $baseArgs = @("-S", $server, "-d", $env:D, "-l", "45", "-b", "-C", "-i", $s.FullName)
-            if (($env:USE_INTEGRATED_PROD).ToString().ToLower() -eq "true") { $args = $baseArgs + "-E" }
-            else {
-              if ([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)) { throw "SQL Auth dipilih tapi DB_USER/PASSWORD kosong" }
-              $args = $baseArgs + @("-U", $env:U, "-P", $env:W)
-            }
-
-            & sqlcmd @args
-            if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed on $($s.Name) with exit code $LASTEXITCODE" }
-          }
-
-          "`n**Recent objects (created/modified in last 60 minutes)**" | Out-File -Append deploy-summary.md -Encoding utf8
-          $qry = @"
-          SET NOCOUNT ON;
-          SELECT TOP (50)
-            s.name + '.' + t.name AS table_name,
-            t.create_date,
-            t.modify_date
-          FROM sys.tables t
-          JOIN sys.schemas s ON s.schema_id = t.schema_id
-          WHERE t.create_date >= DATEADD(MINUTE, -60, SYSUTCDATETIME())
-             OR t.modify_date >= DATEADD(MINUTE, -60, SYSUTCDATETIME())
-          ORDER BY t.modify_date DESC, t.create_date DESC;
-"@
-          $baseArgs2 = @("-S", $server, "-d", $env:D, "-l", "20", "-b", "-C", "-h", "-1", "-W", "-s", " | ", "-Q", $qry)
-          if (($env:USE_INTEGRATED_PROD).ToString().ToLower() -eq "true") { $args2 = $baseArgs2 + "-E" } else { $args2 = $baseArgs2 + @("-U", $env:U, "-P", $env:W) }
-          try { (& sqlcmd @args2) | Out-File -Append deploy-summary.md -Encoding utf8 } catch { "_(No recent changes or query failed)_" | Out-File -Append deploy-summary.md -Encoding utf8 }
+        run: >
+          powershell -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           if([string]::IsNullOrWhiteSpace($env:H)){ throw 'Secret DB_HOST kosong' };
+           $port= if([string]::IsNullOrWhiteSpace($env:P)){'1433'} else {$env:P};
+           if($port -notmatch '^\d+$'){ throw ('DB_PORT invalid: {0}' -f $port) };
+           $server = '{0},{1}' -f $env:H,$port;
+           $scripts = Get-ChildItem -Path 'deploy' -Filter '*.sql' | Sort-Object Name;
+           if(-not $scripts){ 'No SQL files in deploy/. Skipping PROD deploy.' | Out-File -FilePath deploy-summary.md -Encoding utf8; exit 0 }
+           '## PROD Deploy`n' | Out-File -FilePath deploy-summary.md -Encoding utf8;
+           ('**Target:** {0}/{1}`n' -f $server,$env:D) | Out-File -Append deploy-summary.md -Encoding utf8;
+           '**Executed files:**' | Out-File -Append deploy-summary.md -Encoding utf8;
+           foreach($s in $scripts){
+             ('- `{0}`' -f ($s.FullName -replace '\\','/')) | Out-File -Append deploy-summary.md -Encoding utf8;
+             $base = @('-S',$server,'-d',$env:D,'-l','45','-b','-C','-i',$s.FullName);
+             if(($env:USE_INTEGRATED_PROD).ToString().ToLower() -eq 'true'){ $args = $base + '-E' }
+             else {
+               if([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)){ throw 'SQL Auth dipilih tapi DB_USER/PASSWORD kosong' }
+               $args = $base + @('-U',$env:U,'-P',$env:W)
+             }
+             & sqlcmd @args; if($LASTEXITCODE -ne 0){ throw ('sqlcmd failed on {0} with exit code {1}' -f $s.Name,$LASTEXITCODE) }
+           }
+           '`n**Recent objects (created/modified in last 60 minutes)**' | Out-File -Append deploy-summary.md -Encoding utf8;
+           $qry = @'
+           SET NOCOUNT ON;
+           SELECT TOP (50)
+             s.name + '.' + t.name AS table_name,
+             t.create_date,
+             t.modify_date
+           FROM sys.tables t
+           JOIN sys.schemas s ON s.schema_id = t.schema_id
+           WHERE t.create_date >= DATEADD(MINUTE, -60, SYSUTCDATETIME())
+              OR t.modify_date >= DATEADD(MINUTE, -60, SYSUTCDATETIME())
+           ORDER BY t.modify_date DESC, t.create_date DESC;
+'@;
+           $base2 = @('-S',$server,'-d',$env:D,'-l','20','-b','-C','-h','-1','-W','-s',' | ','-Q',$qry);
+           if(($env:USE_INTEGRATED_PROD).ToString().ToLower() -eq 'true'){ $args2 = $base2 + '-E' } else { $args2 = $base2 + @('-U',$env:U,'-P',$env:W) }
+           try { (& sqlcmd @args2) | Out-File -Append deploy-summary.md -Encoding utf8 } catch { '_(No recent changes or query failed)_' | Out-File -Append deploy-summary.md -Encoding utf8 }"
 
       - name: Upload deploy summary
         uses: actions/upload-artifact@v4
