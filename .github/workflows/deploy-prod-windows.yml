@@ -23,6 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ambil path sqlcmd dari Actions Variable
       - name: Use sqlcmd path from repo variable
         run: |
           echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
@@ -30,12 +31,14 @@ jobs:
             echo sqlcmd.exe not found at: ${{ vars.SQLCMD_EXE }}
             exit /b 1
           )
+          echo Using sqlcmd: %SQLCMD_EXE%
 
       - name: Tool check (sqlcmd)
         run: >
           powershell -NoProfile -ExecutionPolicy Bypass -Command
           "$ErrorActionPreference='Stop'; & $env:SQLCMD_EXE -? | Out-Null; Write-Host 'sqlcmd OK'"
 
+      # ====== DEPLOY TANPA -Command (anti 'throw was unexpected') ======
       - name: Deploy to PROD (deploy\*.sql sorted)
         env:
           H: ${{ secrets.DB_HOST }}
@@ -44,34 +47,30 @@ jobs:
           U: ${{ secrets.DB_USER }}
           W: ${{ secrets.DB_PASSWORD }}
         run: |
-          rem ----- header summary -----
           >deploy-summary.md (
             echo ## PROD Deploy
             echo **Target:** %H%/%D%
             echo **Executed files:**
           )
 
-          rem ----- default port -----
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
 
-          rem ----- eksekusi semua deploy\*.sql urut nama -----
-          for %%F in (deploy\*.sql) do (
-            echo - %%~nxF>>deploy-summary.md
-            echo Executing %%~nxF ...
-            "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F"
-            if errorlevel 1 (
-              echo FAILED on %%~nxF
-              exit /b 1
+          if exist deploy\*.sql (
+            for %%F in (deploy\*.sql) do (
+              echo - %%~nxF>>deploy-summary.md
+              echo Executing %%~nxF ...
+              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F"
+              if errorlevel 1 (
+                echo FAILED on %%~nxF
+                exit /b 1
+              )
             )
-          )
-
-          rem ----- kalau tidak ada file, jangan error -----
-          if not exist deploy\*.sql (
+          ) else (
             echo _No SQL files in deploy/._>>deploy-summary.md
           )
 
-
+      # ====== Tambahan ringkasan objek terbaru (tulis ps1 sementara) ======
       - name: Append recent objects (last 60m) to summary
         env:
           H: ${{ secrets.DB_HOST }}
@@ -79,16 +78,13 @@ jobs:
           D: ${{ secrets.DB_NAME }}
           U: ${{ secrets.DB_USER }}
           W: ${{ secrets.DB_PASSWORD }}
-          USE_INTEGRATED_PROD: ${{ vars.USE_INTEGRATED_PROD }}
         run: |
-          rem --- tulis skrip ps1 sementara ---
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
 
           > recent_prod.ps1 (
             echo $ErrorActionPreference = 'Stop'
             echo $server = '%H%,%PORT%'
-
             echo $qry = @'
             echo SET NOCOUNT ON;
             echo SELECT TOP (50)
@@ -101,25 +97,13 @@ jobs:
             echo    OR t.modify_date ^>= DATEADD(MINUTE, -60, SYSUTCDATETIME())
             echo ORDER BY t.modify_date DESC, t.create_date DESC;
             echo '@
-
             echo $base2 = @('-S',$server,'-d','%D%','-l','20','-b','-C','-h','-1','-W','-s',' ^| ','-Q',$qry)
-
-            echo if(('%USE_INTEGRATED_PROD%').ToLower() -eq 'true'^){
-            echo   $args2 = $base2 + '-E'
-            echo ^} else ^{
-            echo   $args2 = $base2 + @('-U','%U%','-P','%W%')
-            echo ^}
-
-            echo try ^{
-            echo   ^& $env:SQLCMD_EXE @args2 ^| Out-File -Append deploy-summary.md -Encoding utf8
-            echo ^} catch ^{
-            echo   '_(No recent changes or query failed)_' ^| Out-File -Append deploy-summary.md -Encoding utf8
-            echo ^}
+            echo $args2 = $base2 + @('-U','%U%','-P','%W%')
+            echo try { ^& $env:SQLCMD_EXE @args2 ^| Out-File -Append deploy-summary.md -Encoding utf8 }
+            echo catch { '_(No recent changes or query failed)_' ^| Out-File -Append deploy-summary.md -Encoding utf8 }
           )
-
-          rem --- eksekusi skrip ps1 ---
           powershell -NoProfile -ExecutionPolicy Bypass -File recent_prod.ps1
-        
+
       - name: Upload deploy summary
         uses: actions/upload-artifact@v4
         with:
