@@ -3,9 +3,13 @@ name: Validate → Deploy STAGING → Comment PR (Windows Self-Hosted)
 on:
   pull_request:
     paths:
-      - "**/*.sql"
+      - "tables/**/*.yml"
+      - "tables/**/*.yaml"
+      - "deploy/**/*.sql"
       - "rules.yml"
       - "validate_sql.py"
+      - "scripts/metadata_validate_and_render.py"
+      - ".github/workflows/validate-staging-comment-windows.yml"
 
 defaults:
   run:
@@ -16,6 +20,7 @@ jobs:
     runs-on: [self-hosted, Windows]
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -23,23 +28,24 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Run validator (scan changed SQL only)
+      # (opsional) jalankan validator SQL lama kamu jika masih mau dipakai
+      - name: Run legacy validator (optional)
+        continue-on-error: true
         run: >
-          powershell -NoProfile -ExecutionPolicy Bypass -Command
-          "$ErrorActionPreference='Stop';
-           git fetch --no-tags --prune --depth=1 origin ${{ github.base_ref }};
-           $changed = git diff --name-only origin/${{ github.base_ref }}... | Select-String -Pattern '\.sql$' | % { $_.ToString() };
-           if($changed){ Write-Host 'Changed SQL files:'; $changed | % { Write-Host $_ }; python validate_sql.py --junit report-metadata.xml --files $changed }
-           else { Write-Host 'No changed SQL files, scanning all *.sql'; python validate_sql.py --junit report-metadata.xml }"
+          python validate_sql.py --junit report.xml
 
-      - name: Upload JUnit report
+      # ======== BARU: Validasi metadata & generate SQL ke deploy/ ========
+      - name: Generate CREATE TABLE from metadata (PoC)
+        run: >
+          python scripts/metadata_validate_and_render.py tables deploy
+
+      - name: Upload generated SQL
         uses: actions/upload-artifact@v4
         with:
-          name: junit
-          path: report-metadata.xml
+          name: generated-sql
+          path: deploy/*.sql
 
   deploy_staging:
-    if: github.event_name == 'pull_request'
     needs: validate
     runs-on: [self-hosted, Windows]
     environment: staging
@@ -53,70 +59,38 @@ jobs:
             echo sqlcmd.exe not found at: ${{ vars.SQLCMD_EXE }}
             exit /b 1
           )
+          echo Using sqlcmd: %SQLCMD_EXE%
 
-      - name: Deploy to STAGING (deploy\*.sql sorted)
-        id: deploy
+      - name: Deploy to STAGING (dwdb-sol / DQ_DEV)
         env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-          D: ${{ secrets.STG_DB_NAME }}
+          H: ${{ secrets.STG_DB_HOST }}   # dwdb-sol
+          P: ${{ secrets.STG_DB_PORT }}   # 1433
+          D: ${{ secrets.STG_DB_NAME }}   # DQ_DEV
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
-          USE_INTEGRATED: ${{ vars.USE_INTEGRATED }}   # "true"/"false"
-        run: >
-          powershell -NoProfile -ExecutionPolicy Bypass -Command
-          "$ErrorActionPreference='Stop';
-           $port= if([string]::IsNullOrWhiteSpace($env:P)){'1433'} else {$env:P};
-           if($port -notmatch '^\d+$'){ throw ('STG_DB_PORT invalid: {0}' -f $port) };
-           $server = '{0},{1}' -f $env:H,$port;
-           $scripts = Get-ChildItem -Path 'deploy' -Filter '*.sql' | Sort-Object Name;
-           if(-not $scripts){ 'No SQL files in deploy/. Skipping staging deploy.' | Out-File -FilePath deploy-summary.md -Encoding utf8; exit 0 }
-           '## Staging Deploy`n' | Out-File -FilePath deploy-summary.md -Encoding utf8;
-           ('**Target:** {0}/{1}`n' -f $server,$env:D) | Out-File -Append deploy-summary.md -Encoding utf8;
-           '**Executed files:**' | Out-File -Append deploy-summary.md -Encoding utf8;
-           foreach($s in $scripts){
-             ('- `{0}`' -f ($s.FullName -replace '\\','/')) | Out-File -Append deploy-summary.md -Encoding utf8;
-             $base = @('-S',$server,'-d',$env:D,'-l','30','-b','-C','-i',$s.FullName);
-             if(($env:USE_INTEGRATED).ToString().ToLower() -eq 'true'){ $args = $base + '-E' }
-             else {
-               if([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)){ throw 'SQL Auth dipilih tapi STG_DB_USER/PASSWORD kosong' }
-               $args = $base + @('-U',$env:U,'-P',$env:W)
-             }
-             & $env:SQLCMD_EXE @args; if($LASTEXITCODE -ne 0){ throw ('sqlcmd failed on {0} with exit code {1}' -f $s.Name,$LASTEXITCODE) }
-           }
-           '`n**Recent objects (created/modified in last 30 minutes)**' | Out-File -Append deploy-summary.md -Encoding utf8;
-           $qry = @'
-           SET NOCOUNT ON;
-           SELECT TOP (30)
-             s.name + '.' + t.name AS table_name,
-             t.create_date,
-             t.modify_date
-           FROM sys.tables t
-           JOIN sys.schemas s ON s.schema_id = t.schema_id
-           WHERE t.create_date >= DATEADD(MINUTE, -30, SYSUTCDATETIME())
-              OR t.modify_date >= DATEADD(MINUTE, -30, SYSUTCDATETIME())
-           ORDER BY t.modify_date DESC, t.create_date DESC;
-'@;
-           $base2 = @('-S',$server,'-d',$env:D,'-l','15','-b','-C','-h','-1','-W','-s',' | ','-Q',$qry);
-           if(($env:USE_INTEGRATED).ToString().ToLower() -eq 'true'){ $args2 = $base2 + '-E' } else { $args2 = $base2 + @('-U',$env:U,'-P',$env:W) }
-           try { (& $env:SQLCMD_EXE @args2) | Out-File -Append deploy-summary.md -Encoding utf8 } catch { '_(No recent changes or query failed)_' | Out-File -Append deploy-summary.md -Encoding utf8 }"
+        run: |
+          set "PORT=%P%"
+          if "%PORT%"=="" set "PORT=1433"
+          for %%F in (deploy\*.sql) do (
+            echo Executing %%~nxF ...
+            "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F"
+            if errorlevel 1 (
+              echo FAILED on %%~nxF
+              exit /b 1
+            )
+          )
 
-      - name: Upload deploy summary
-        uses: actions/upload-artifact@v4
-        with:
-          name: staging-deploy-summary
-          path: deploy-summary.md
-
-      - name: Comment on PR with validator + staging deploy summary
+      - name: Comment on PR (summary)
         uses: actions/github-script@v7
         with:
           script: |
-            const fs = require('fs');
-            const header = "### ✅ Validator passed & Staging Deploy (Windows self-hosted)\n" +
-                           "**Workflow:** " + process.env.GITHUB_WORKFLOW + "\n\n";
-            let body = header;
-            try { body += fs.readFileSync('deploy-summary.md', 'utf8'); }
-            catch { body += "_No deploy summary found._"; }
+            const body = [
+              "### ✅ Metadata validated & tables deployed to **DQ_DEV**",
+              "- Workflow: " + process.env.GITHUB_WORKFLOW,
+              "- Target: `" + process.env.STG_DB_HOST + "` / `" + process.env.STG_DB_NAME + "`",
+              "",
+              "Artifacts: **generated-sql** (lihat tab Artifacts)."
+            ].join("\n");
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
