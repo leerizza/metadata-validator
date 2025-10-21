@@ -14,14 +14,14 @@ jobs:
     environment: staging
     steps:
       - name: Tool check (sqlcmd)
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           sqlcmd -? | Out-Null
           Write-Host "sqlcmd OK"
 
       - name: DNS resolve
-        shell: pwsh
+        shell: powershell
         env:
           H: ${{ secrets.STG_DB_HOST }}
         run: |
@@ -30,7 +30,7 @@ jobs:
           try { Resolve-DnsName $env:H -ErrorAction Stop | Select-Object -First 3 | Format-Table } catch { Write-Host "DNS resolve gagal: $($_.Exception.Message)" }
 
       - name: TCP port check
-        shell: pwsh
+        shell: powershell
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
@@ -44,7 +44,7 @@ jobs:
           Write-Host "TCP OK"
 
       - name: Try sqlcmd login (SELECT 1)
-        shell: pwsh
+        shell: powershell
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
