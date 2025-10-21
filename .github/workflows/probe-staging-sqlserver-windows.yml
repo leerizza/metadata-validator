@@ -35,12 +35,10 @@ jobs:
       - name: DNS resolve
         env:
           H: ${{ secrets.STG_DB_HOST }}
-        run: >
-          powershell -NoProfile -ExecutionPolicy Bypass -Command
-          "$ErrorActionPreference='Stop';
-           if([string]::IsNullOrWhiteSpace($env:H)){ throw 'Secret STG_DB_HOST tidak di-set' };
-           try { Resolve-DnsName $env:H -ErrorAction Stop | Select-Object -First 3 | Format-Table -AutoSize }
-           catch { Write-Host ('DNS resolve gagal: {0}' -f $_.Exception.Message) }"
+        run: |
+          echo Resolving %H% ...
+          nslookup %H% || (echo DNS FAILED & exit /b 1)
+
 
       - name: TCP port check
         env:
@@ -49,11 +47,10 @@ jobs:
         run: >
           powershell -NoProfile -ExecutionPolicy Bypass -Command
           "$ErrorActionPreference='Stop';
-           $port= if([string]::IsNullOrWhiteSpace($env:P)){'1433'} else {$env:P};
-           if($port -notmatch '^\d+$'){ throw ('STG_DB_PORT invalid: {0}' -f $port) };
-           Write-Host ('Checking TCP {0}:{1}…' -f $env:H,$port);
-           if(-not (Test-NetConnection -ComputerName $env:H -Port $port -InformationLevel Quiet)){ throw 'TCP FAILED' };
-           Write-Host 'TCP OK'"
+           $p = '%P%'; if([string]::IsNullOrWhiteSpace($p)){$p='1433'};
+           Write-Host ('Checking TCP %H%:{0} ...' -f $p);
+           $ok = Test-NetConnection -ComputerName '%H%' -Port ([int]$p) -InformationLevel Quiet;
+           if(-not $ok){ Write-Host 'TCP FAILED'; exit 1 } else { Write-Host 'TCP OK' }"
 
       - name: Try sqlcmd login (SELECT 1)
         env:
@@ -66,17 +63,21 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -Command
           "$ErrorActionPreference='Stop';
            $useIntegrated = '${{ github.event.inputs.use_integrated }}'.ToLower() -eq 'true';
-           $port= if([string]::IsNullOrWhiteSpace($env:P)){'1433'} else {$env:P};
-           if($port -notmatch '^\d+$'){ throw ('STG_DB_PORT invalid: {0}' -f $port) };
-           $server = '{0},{1}' -f $env:H,$port;
-           $base = @('-S',$server,'-d',$env:D,'-l','10','-b','-C');
+           $port = '%P%'; if([string]::IsNullOrWhiteSpace($port)){$port='1433'};
+           if($port -notmatch '^\d+$'){ Write-Host ('STG_DB_PORT invalid: {0}' -f $port); exit 1 };
+           $server = '{0},{1}' -f '%H%',$port;
+           $base = @('-S',$server,'-d','%D%','-l','10','-b','-C');
            if($useIntegrated){ $args = $base + '-E' }
            else {
-             if([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)){ throw 'SQL Auth dipilih tapi STG_DB_USER/PASSWORD kosong' }
-             $args = $base + @('-U',$env:U,'-P',$env:W)
+             if([string]::IsNullOrWhiteSpace('%U%') -or [string]::IsNullOrWhiteSpace('%W%')){
+               Write-Host 'SQL Auth dipilih tapi STG_DB_USER/PASSWORD kosong'; exit 1
+             }
+             $args = $base + @('-U','%U%','-P','%W%')
            }
            $args += @('-Q','SET NOCOUNT ON; SELECT 1 AS ok, DB_NAME() AS db, SYSTEM_USER AS login;');
            Write-Host ('Running: {0} {1}' -f $env:SQLCMD_EXE, ($args -join ' '));
            & $env:SQLCMD_EXE @args;
-           if($LASTEXITCODE -ne 0){ throw ('sqlcmd failed with exit code {0}' -f $LASTEXITCODE) };
+           if($LASTEXITCODE -ne 0){ Write-Host ('sqlcmd failed with exit code {0}' -f $LASTEXITCODE); exit 1 }
            Write-Host 'SELECT 1 OK'"
+
+      
