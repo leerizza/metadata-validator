@@ -12,15 +12,24 @@ concurrency:
   group: deploy-prod
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: powershell
+
 jobs:
   deploy:
-    runs-on: [self-hosted, Windows]   # atau label khusus runner kamu
+    runs-on: [self-hosted, Windows]
     environment: production
     steps:
       - uses: actions/checkout@v4
 
+      - name: Allow PowerShell scripts for this job
+        run: |
+          Write-Host "Before:"; Get-ExecutionPolicy -List
+          Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+          Write-Host "After:"; Get-ExecutionPolicy -List
+
       - name: Tool check (sqlcmd)
-        shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           sqlcmd -? | Out-Null
@@ -28,7 +37,6 @@ jobs:
 
       - name: Deploy to PROD (deploy\*.sql sorted)
         id: deploy
-        shell: pwsh
         env:
           H: ${{ secrets.DB_HOST }}
           P: ${{ secrets.DB_PORT }}
@@ -58,12 +66,9 @@ jobs:
             "- `$($s.FullName.Replace('\','/'))`" | Out-File -Append deploy-summary.md -Encoding utf8
 
             $baseArgs = @("-S", $server, "-d", $env:D, "-l", "45", "-b", "-C", "-i", $s.FullName)
-            if (($env:USE_INTEGRATED_PROD).ToString().ToLower() -eq "true") {
-              $args = $baseArgs + "-E"
-            } else {
-              if ([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)) {
-                throw "SQL Auth dipilih tapi DB_USER/PASSWORD kosong"
-              }
+            if (($env:USE_INTEGRATED_PROD).ToString().ToLower() -eq "true") { $args = $baseArgs + "-E" }
+            else {
+              if ([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)) { throw "SQL Auth dipilih tapi DB_USER/PASSWORD kosong" }
               $args = $baseArgs + @("-U", $env:U, "-P", $env:W)
             }
 
