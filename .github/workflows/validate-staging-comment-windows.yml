@@ -47,11 +47,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Use sqlcmd path from repo variable
-        run: >
-          powershell -NoProfile -ExecutionPolicy Bypass -Command
-          "[IO.File]::AppendAllText($env:GITHUB_ENV,'SQLCMD_EXE=${{ vars.SQLCMD_EXE }}' + \"`n\");
-           if(-not (Test-Path '${{ vars.SQLCMD_EXE }}')){ Write-Host 'sqlcmd.exe not found at: ${{ vars.SQLCMD_EXE }}'; exit 1 }
-           else{ Write-Host 'Using sqlcmd: ${{ vars.SQLCMD_EXE }}' }"
+        run: |
+          echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
+          if not exist "${{ vars.SQLCMD_EXE }}" (
+            echo sqlcmd.exe not found at: ${{ vars.SQLCMD_EXE }}
+            exit /b 1
+          )
 
       - name: Deploy to STAGING (deploy\*.sql sorted)
         id: deploy
