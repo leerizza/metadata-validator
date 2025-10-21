@@ -9,20 +9,13 @@ on:
 
 defaults:
   run:
-    shell: powershell
+    shell: cmd
 
 jobs:
   validate:
     runs-on: [self-hosted, Windows]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Allow PowerShell scripts for this job
-        run: |
-          Write-Host "Before:"; Get-ExecutionPolicy -List
-          Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
-          Write-Host "After:"; Get-ExecutionPolicy -List
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -31,17 +24,18 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run validator (scan changed SQL only)
-        run: |
-          $ErrorActionPreference = "Stop"
-          git fetch --no-tags --prune --depth=1 origin ${{ github.base_ref }}
-          $changed = git diff --name-only origin/${{ github.base_ref }}... | Select-String -Pattern '\.sql$' | ForEach-Object { $_.ToString() }
-          if ($changed) {
-            Write-Host "Changed SQL files:"; $changed | ForEach-Object { Write-Host $_ }
-            python validate_sql.py --junit report-metadata.xml --files $changed
-          } else {
-            Write-Host "No changed SQL files, scanning all *.sql"
-            python validate_sql.py --junit report-metadata.xml
-          }
+        run: >
+          powershell -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           git fetch --no-tags --prune --depth=1 origin ${{ github.base_ref }};
+           $changed = git diff --name-only origin/${{ github.base_ref }}... | Select-String -Pattern '\.sql$' | % { $_.ToString() };
+           if($changed){
+             Write-Host 'Changed SQL files:'; $changed | % { Write-Host $_ };
+             python validate_sql.py --junit report-metadata.xml --files $changed
+           } else {
+             Write-Host 'No changed SQL files, scanning all *.sql';
+             python validate_sql.py --junit report-metadata.xml
+           }"
 
       - name: Upload JUnit report
         uses: actions/upload-artifact@v4
@@ -57,10 +51,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Allow PowerShell scripts for this job
-        run: |
-          Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
-
       - name: Deploy to STAGING (deploy\*.sql sorted)
         id: deploy
         env:
@@ -70,50 +60,43 @@ jobs:
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
           USE_INTEGRATED: ${{ vars.USE_INTEGRATED }}   # "true"/"false"
-        run: |
-          $ErrorActionPreference = "Stop"
-          $port = if ([string]::IsNullOrWhiteSpace($env:P)) { "1433" } else { $env:P }
-          if ($port -notmatch '^\d+$') { throw "STG_DB_PORT invalid: '$port'" }
-          $server = "$($env:H),$port"
-
-          $scripts = Get-ChildItem -Path "deploy" -Filter "*.sql" | Sort-Object Name
-          if (-not $scripts) {
-            "No SQL files in deploy/. Skipping staging deploy." | Out-File -FilePath deploy-summary.md -Encoding utf8
-            exit 0
-          }
-
-          "## Staging Deploy`n" | Out-File -FilePath deploy-summary.md -Encoding utf8
-          "**Target:** $server/$($env:D)`n" | Out-File -Append deploy-summary.md -Encoding utf8
-          "**Executed files:**" | Out-File -Append deploy-summary.md -Encoding utf8
-
-          foreach ($s in $scripts) {
-            "- `$($s.FullName.Replace('\','/'))`" | Out-File -Append deploy-summary.md -Encoding utf8
-            $baseArgs = @("-S", $server, "-d", $env:D, "-l", "30", "-b", "-C", "-i", $s.FullName)
-            if (($env:USE_INTEGRATED).ToString().ToLower() -eq "true") { $args = $baseArgs + "-E" }
-            else {
-              if ([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)) { throw "SQL Auth dipilih tapi STG_DB_USER/PASSWORD kosong" }
-              $args = $baseArgs + @("-U", $env:U, "-P", $env:W)
-            }
-            & sqlcmd @args
-            if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed on $($s.Name) with exit code $LASTEXITCODE" }
-          }
-
-          "`n**Recent objects (created/modified in last 30 minutes)**" | Out-File -Append deploy-summary.md -Encoding utf8
-          $qry = @"
-          SET NOCOUNT ON;
-          SELECT TOP (30)
-            s.name + '.' + t.name AS table_name,
-            t.create_date,
-            t.modify_date
-          FROM sys.tables t
-          JOIN sys.schemas s ON s.schema_id = t.schema_id
-          WHERE t.create_date >= DATEADD(MINUTE, -30, SYSUTCDATETIME())
-             OR t.modify_date >= DATEADD(MINUTE, -30, SYSUTCDATETIME())
-          ORDER BY t.modify_date DESC, t.create_date DESC;
-"@
-          $baseArgs2 = @("-S", $server, "-d", $env:D, "-l", "15", "-b", "-C", "-h", "-1", "-W", "-s", " | ", "-Q", $qry)
-          if (($env:USE_INTEGRATED).ToString().ToLower() -eq "true") { $args2 = $baseArgs2 + "-E" } else { $args2 = $baseArgs2 + @("-U", $env:U, "-P", $env:W) }
-          try { (& sqlcmd @args2) | Out-File -Append deploy-summary.md -Encoding utf8 } catch { "_(No recent changes or query failed)_" | Out-File -Append deploy-summary.md -Encoding utf8 }
+        run: >
+          powershell -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           $port= if([string]::IsNullOrWhiteSpace($env:P)){'1433'} else {$env:P};
+           if($port -notmatch '^\d+$'){ throw ('STG_DB_PORT invalid: {0}' -f $port) };
+           $server = '{0},{1}' -f $env:H,$port;
+           $scripts = Get-ChildItem -Path 'deploy' -Filter '*.sql' | Sort-Object Name;
+           if(-not $scripts){ 'No SQL files in deploy/. Skipping staging deploy.' | Out-File -FilePath deploy-summary.md -Encoding utf8; exit 0 }
+           '## Staging Deploy`n' | Out-File -FilePath deploy-summary.md -Encoding utf8;
+           ('**Target:** {0}/{1}`n' -f $server,$env:D) | Out-File -Append deploy-summary.md -Encoding utf8;
+           '**Executed files:**' | Out-File -Append deploy-summary.md -Encoding utf8;
+           foreach($s in $scripts){
+             ('- `{0}`' -f ($s.FullName -replace '\\','/')) | Out-File -Append deploy-summary.md -Encoding utf8;
+             $base = @('-S',$server,'-d',$env:D,'-l','30','-b','-C','-i',$s.FullName);
+             if(($env:USE_INTEGRATED).ToString().ToLower() -eq 'true'){ $args = $base + '-E' }
+             else {
+               if([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)){ throw 'SQL Auth dipilih tapi STG_DB_USER/PASSWORD kosong' }
+               $args = $base + @('-U',$env:U,'-P',$env:W)
+             }
+             & sqlcmd @args; if($LASTEXITCODE -ne 0){ throw ('sqlcmd failed on {0} with exit code {1}' -f $s.Name,$LASTEXITCODE) }
+           }
+           '`n**Recent objects (created/modified in last 30 minutes)**' | Out-File -Append deploy-summary.md -Encoding utf8;
+           $qry = @'
+           SET NOCOUNT ON;
+           SELECT TOP (30)
+             s.name + '.' + t.name AS table_name,
+             t.create_date,
+             t.modify_date
+           FROM sys.tables t
+           JOIN sys.schemas s ON s.schema_id = t.schema_id
+           WHERE t.create_date >= DATEADD(MINUTE, -30, SYSUTCDATETIME())
+              OR t.modify_date >= DATEADD(MINUTE, -30, SYSUTCDATETIME())
+           ORDER BY t.modify_date DESC, t.create_date DESC;
+'@;
+           $base2 = @('-S',$server,'-d',$env:D,'-l','15','-b','-C','-h','-1','-W','-s',' | ','-Q',$qry);
+           if(($env:USE_INTEGRATED).ToString().ToLower() -eq 'true'){ $args2 = $base2 + '-E' } else { $args2 = $base2 + @('-U',$env:U,'-P',$env:W) }
+           try { (& sqlcmd @args2) | Out-File -Append deploy-summary.md -Encoding utf8 } catch { '_(No recent changes or query failed)_' | Out-File -Append deploy-summary.md -Encoding utf8 }"
 
       - name: Upload deploy summary
         uses: actions/upload-artifact@v4
