@@ -7,19 +7,30 @@ on:
       - "rules.yml"
       - "validate_sql.py"
 
+defaults:
+  run:
+    shell: powershell
+
 jobs:
   validate:
     runs-on: [self-hosted, Windows]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Allow PowerShell scripts for this job
+        run: |
+          Write-Host "Before:"; Get-ExecutionPolicy -List
+          Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+          Write-Host "After:"; Get-ExecutionPolicy -List
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install deps
-        shell: powershell
         run: pip install -r requirements.txt
+
       - name: Run validator (scan changed SQL only)
-        shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           git fetch --no-tags --prune --depth=1 origin ${{ github.base_ref }}
@@ -31,6 +42,7 @@ jobs:
             Write-Host "No changed SQL files, scanning all *.sql"
             python validate_sql.py --junit report-metadata.xml
           }
+
       - name: Upload JUnit report
         uses: actions/upload-artifact@v4
         with:
@@ -45,16 +57,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Allow PowerShell scripts for this job
+        run: |
+          Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+
       - name: Deploy to STAGING (deploy\*.sql sorted)
         id: deploy
-        shell: powershell
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
           D: ${{ secrets.STG_DB_NAME }}
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
-          USE_INTEGRATED: ${{ vars.USE_INTEGRATED }}   # "true"/"false" (repo/org variable)
+          USE_INTEGRATED: ${{ vars.USE_INTEGRATED }}   # "true"/"false"
         run: |
           $ErrorActionPreference = "Stop"
           $port = if ([string]::IsNullOrWhiteSpace($env:P)) { "1433" } else { $env:P }
@@ -74,12 +89,9 @@ jobs:
           foreach ($s in $scripts) {
             "- `$($s.FullName.Replace('\','/'))`" | Out-File -Append deploy-summary.md -Encoding utf8
             $baseArgs = @("-S", $server, "-d", $env:D, "-l", "30", "-b", "-C", "-i", $s.FullName)
-            if (($env:USE_INTEGRATED).ToString().ToLower() -eq "true") {
-              $args = $baseArgs + "-E"
-            } else {
-              if ([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)) {
-                throw "SQL Auth dipilih tapi STG_DB_USER/PASSWORD kosong"
-              }
+            if (($env:USE_INTEGRATED).ToString().ToLower() -eq "true") { $args = $baseArgs + "-E" }
+            else {
+              if ([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)) { throw "SQL Auth dipilih tapi STG_DB_USER/PASSWORD kosong" }
               $args = $baseArgs + @("-U", $env:U, "-P", $env:W)
             }
             & sqlcmd @args
@@ -117,16 +129,11 @@ jobs:
             const header = "### ✅ Validator passed & Staging Deploy (Windows self-hosted)\n" +
                            "**Workflow:** " + process.env.GITHUB_WORKFLOW + "\n\n";
             let body = header;
-            try {
-              const sum = fs.readFileSync('deploy-summary.md', 'utf8');
-              body += sum;
-            } catch (e) {
-              body += "_No deploy summary found._";
-            }
-            const prNumber = context.payload.pull_request.number;
+            try { body += fs.readFileSync('deploy-summary.md', 'utf8'); }
+            catch { body += "_No deploy summary found._"; }
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: prNumber,
+              issue_number: context.payload.pull_request.number,
               body
             });
