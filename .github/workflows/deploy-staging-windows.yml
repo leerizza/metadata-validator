@@ -1,0 +1,121 @@
+name: Deploy to STAGING (Windows Self-Hosted)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy_staging:
+    runs-on: [self-hosted, Windows]
+    environment: staging
+
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # --- SQLCMD PATH -------------------------------------------------------
+      - name: Ensure sqlcmd path
+        run: |
+          set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
+          if not exist "%SQLCMD_EXE%" (
+            echo ❌ sqlcmd not found in expected path.
+            exit /b 1
+          )
+          echo ✅ Found sqlcmd at "%SQLCMD_EXE%"
+        shell: cmd
+
+      # --- PRE-FLIGHT CHECKS -------------------------------------------------
+      - name: Echo target
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
+          D: ${{ secrets.STG_DB_NAME }}
+        run: |
+          set "PORT=%P%"
+          if "%PORT%"=="" set "PORT=1433"
+          if "%H%"=="" (
+            echo ❌ Secret STG_DB_HOST kosong
+            exit /b 1
+          )
+          echo Target: %H%,%PORT% / DB=%D%
+
+      - name: DNS resolve
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+        run: |
+          nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
+
+      - name: TCP port check
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           $p = '%P%'; if([string]::IsNullOrWhiteSpace($p)){$p='1433'};
+           if(-not (Test-NetConnection -ComputerName '%H%' -Port ([int]$p) -InformationLevel Quiet)){
+             Write-Host '❌ TCP connection failed'; exit 1
+           }
+           Write-Host '✅ TCP OK'"
+
+      - name: Test sqlcmd login (SELECT 1)
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
+          D: ${{ secrets.STG_DB_NAME }}
+          U: ${{ secrets.STG_DB_USER }}
+          W: ${{ secrets.STG_DB_PASSWORD }}
+        run: |
+          set "PORT=%P%"
+          if "%PORT%"=="" set "PORT=1433"
+          "C:\Program Files\SqlCmd\sqlcmd.exe" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
+          if errorlevel 1 exit /b 1
+
+      # --- SQL TYPE VALIDATION GUARD -----------------------------------------
+      - name: Block disallowed types in deploy SQL (no MAX, no legacy LOB)
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           $bad = @();
+           $re = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)';
+           $legacy = '\b(?:text|ntext|image)\b';
+           if(Test-Path 'deploy'){
+             Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse | ForEach-Object {
+               $t = (Get-Content $_.FullName -Raw).ToLower();
+               if($t -match $re -or $t -match $legacy){ $bad += $_.FullName }
+             }
+           }
+           if($bad.Count -gt 0){
+             Write-Host '❌ Disallowed types ditemukan di file berikut:';
+             $bad | ForEach-Object { Write-Host (' - ' + $_) };
+             exit 1
+           }
+           Write-Host '✅ Tidak ada tipe terlarang di deploy/*.sql.'"
+
+      # --- DEPLOYMENT --------------------------------------------------------
+      - name: Deploy to STAGING (deploy/*.sql sorted)
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
+          D: ${{ secrets.STG_DB_NAME }}
+          U: ${{ secrets.STG_DB_USER }}
+          W: ${{ secrets.STG_DB_PASSWORD }}
+        run: |
+          setlocal enabledelayedexpansion
+          set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
+          set "PORT=%P%"
+          if "%PORT%"=="" set "PORT=1433"
+
+          echo Running deploy scripts on %H%,%PORT% [%D%] ...
+          for /f "delims=" %%f in ('dir /b /o:n deploy\*.sql') do (
+            echo Executing %%f ...
+            "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%f"
+            if errorlevel 1 (
+              echo ❌ FAILED ON %%f
+              exit /b 1
+            )
+          )
+          echo ✅ All deploy SQL executed successfully.
