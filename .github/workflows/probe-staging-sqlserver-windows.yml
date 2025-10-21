@@ -8,9 +8,10 @@ on:
         required: false
         default: "false"
 
+# Pakai shell cmd secara default; semua perintah dipanggil via powershell -ExecutionPolicy Bypass
 defaults:
   run:
-    shell: powershell
+    shell: cmd
 
 jobs:
   probe:
@@ -19,38 +20,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Allow PowerShell scripts for this job
-        run: |
-          Write-Host "Before:"; Get-ExecutionPolicy -List
-          Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
-          Write-Host "After:"; Get-ExecutionPolicy -List
-
       - name: Tool check (sqlcmd)
-        run: |
-          $ErrorActionPreference = "Stop"
-          sqlcmd -? | Out-Null
-          Write-Host "sqlcmd OK"
+        run: >
+          powershell -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop'; sqlcmd -? | Out-Null; Write-Host 'sqlcmd OK'"
 
       - name: DNS resolve
         env:
           H: ${{ secrets.STG_DB_HOST }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          if ([string]::IsNullOrWhiteSpace($env:H)) { throw "Secret STG_DB_HOST tidak di-set" }
-          try { Resolve-DnsName $env:H -ErrorAction Stop | Select-Object -First 3 | Format-Table } catch { Write-Host "DNS resolve gagal: $($_.Exception.Message)" }
+        run: >
+          powershell -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           if([string]::IsNullOrWhiteSpace($env:H)){ throw 'Secret STG_DB_HOST tidak di-set' };
+           try { Resolve-DnsName $env:H -ErrorAction Stop | Select-Object -First 3 | Format-Table -AutoSize }
+           catch { Write-Host ('DNS resolve gagal: {0}' -f $_.Exception.Message) }"
 
       - name: TCP port check
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $port = if ([string]::IsNullOrWhiteSpace($env:P)) { "1433" } else { $env:P }
-          if ($port -notmatch '^\d+$') { throw "STG_DB_PORT invalid: '$port'" }
-          Write-Host "Checking TCP $env:H:$port ..."
-          $res = Test-NetConnection -ComputerName $env:H -Port $port -InformationLevel Quiet
-          if (-not $res) { throw "TCP FAILED to $($env:H):$port" }
-          Write-Host "TCP OK"
+        run: >
+          powershell -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           $port= if([string]::IsNullOrWhiteSpace($env:P)){'1433'} else {$env:P};
+           if($port -notmatch '^\d+$'){ throw ('STG_DB_PORT invalid: {0}' -f $port) };
+           Write-Host ('Checking TCP {0}:{1}…' -f $env:H,$port);
+           if(-not (Test-NetConnection -ComputerName $env:H -Port $port -InformationLevel Quiet)){ throw 'TCP FAILED' };
+           Write-Host 'TCP OK'"
 
       - name: Try sqlcmd login (SELECT 1)
         env:
@@ -59,24 +55,21 @@ jobs:
           D: ${{ secrets.STG_DB_NAME }}
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $useIntegrated = '${{ github.event.inputs.use_integrated }}'.ToLower() -eq 'true'
-          $port = if ([string]::IsNullOrWhiteSpace($env:P)) { "1433" } else { $env:P }
-          if ($port -notmatch '^\d+$') { throw "STG_DB_PORT invalid: '$port'" }
-
-          $server = "$($env:H),$port"
-          $baseArgs = @("-S", $server, "-d", $env:D, "-l", "10", "-b", "-C")  # -C trust server cert
-          if ($useIntegrated) {
-            $args = $baseArgs + "-E"
-          } else {
-            if ([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)) {
-              throw "SQL Auth dipilih tapi STG_DB_USER/PASSWORD kosong"
-            }
-            $args = $baseArgs + @("-U", $env:U, "-P", $env:W)
-          }
-          $args = $args + @("-Q", "SET NOCOUNT ON; SELECT 1 AS ok, DB_NAME() AS db, SYSTEM_USER AS login;")
-          Write-Host "Running: sqlcmd $server (Integrated=$useIntegrated)"
-          & sqlcmd @args
-          if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed with exit code $LASTEXITCODE" }
-          Write-Host "SELECT 1 OK"
+        run: >
+          powershell -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           $useIntegrated = '${{ github.event.inputs.use_integrated }}'.ToLower() -eq 'true';
+           $port= if([string]::IsNullOrWhiteSpace($env:P)){'1433'} else {$env:P};
+           if($port -notmatch '^\d+$'){ throw ('STG_DB_PORT invalid: {0}' -f $port) };
+           $server = '{0},{1}' -f $env:H,$port;
+           $base = @('-S',$server,'-d',$env:D,'-l','10','-b','-C');
+           if($useIntegrated){ $args = $base + '-E' }
+           else {
+             if([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)){ throw 'SQL Auth dipilih tapi STG_DB_USER/PASSWORD kosong' }
+             $args = $base + @('-U',$env:U,'-P',$env:W)
+           }
+           $args = $args + @('-Q','SET NOCOUNT ON; SELECT 1 AS ok, DB_NAME() AS db, SYSTEM_USER AS login;');
+           Write-Host ('Running: sqlcmd {0} (Integrated={1})' -f $server,$useIntegrated);
+           & sqlcmd @args;
+           if($LASTEXITCODE -ne 0){ throw ('sqlcmd failed with exit code {0}' -f $LASTEXITCODE) };
+           Write-Host 'SELECT 1 OK'"
