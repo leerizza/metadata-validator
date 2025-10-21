@@ -1,0 +1,74 @@
+name: Probe STAGING SQL Server (Windows Self-Hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      use_integrated:
+        description: "Gunakan Windows Integrated Auth (true/false)"
+        required: false
+        default: "false"
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Windows]   # atau label custom milikmu
+    environment: staging
+    steps:
+      - name: Tool check (sqlcmd)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          sqlcmd -? | Out-Null
+          Write-Host "sqlcmd OK"
+
+      - name: DNS resolve
+        shell: pwsh
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:H)) { throw "Secret STG_DB_HOST tidak di-set" }
+          try { Resolve-DnsName $env:H -ErrorAction Stop | Select-Object -First 3 | Format-Table } catch { Write-Host "DNS resolve gagal: $($_.Exception.Message)" }
+
+      - name: TCP port check
+        shell: pwsh
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $port = if ([string]::IsNullOrWhiteSpace($env:P)) { "1433" } else { $env:P }
+          if ($port -notmatch '^\d+$') { throw "STG_DB_PORT invalid: '$port'" }
+          Write-Host "Checking TCP $env:H:$port ..."
+          $res = Test-NetConnection -ComputerName $env:H -Port $port -InformationLevel Quiet
+          if (-not $res) { throw "TCP FAILED to $($env:H):$port" }
+          Write-Host "TCP OK"
+
+      - name: Try sqlcmd login (SELECT 1)
+        shell: pwsh
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
+          D: ${{ secrets.STG_DB_NAME }}
+          U: ${{ secrets.STG_DB_USER }}
+          W: ${{ secrets.STG_DB_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $useIntegrated = '${{ github.event.inputs.use_integrated }}'.ToLower() -eq 'true'
+          $port = if ([string]::IsNullOrWhiteSpace($env:P)) { "1433" } else { $env:P }
+          if ($port -notmatch '^\d+$') { throw "STG_DB_PORT invalid: '$port'" }
+
+          $server = "$($env:H),$port"
+          $baseArgs = @("-S", $server, "-d", $env:D, "-l", "10", "-b", "-C")  # -C: trust server cert
+          if ($useIntegrated) {
+            $args = $baseArgs + "-E"
+          } else {
+            if ([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)) {
+              throw "SQL Auth dipilih tapi STG_DB_USER/PASSWORD kosong"
+            }
+            $args = $baseArgs + @("-U", $env:U, "-P", $env:W)
+          }
+          $args = $args + @("-Q", "SET NOCOUNT ON; SELECT 1 AS ok, DB_NAME() AS db, SYSTEM_USER AS login;")
+          Write-Host "Running: sqlcmd $server (Integrated=$useIntegrated)"
+          & sqlcmd @args
+          if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed with exit code $LASTEXITCODE" }
+          Write-Host "SELECT 1 OK"

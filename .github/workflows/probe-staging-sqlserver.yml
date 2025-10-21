@@ -8,6 +8,16 @@ jobs:
     # kalau pakai self-hosted runner internal, ganti jadi: runs-on: self-hosted
     runs-on: ubuntu-latest
     environment: staging
+    env:
+      H: ${{ secrets.STG_DB_HOST }}
+      P: ${{ secrets.STG_DB_PORT }}
+      N: ${{ secrets.STG_DB_NAME }}
+      D: ${{ secrets.STG_DB_NAME }}
+      U: ${{ secrets.STG_DB_USER }}
+      W: ${{ secrets.STG_DB_PASSWORD }}
+      # sqlcmd v18 default ENCRYPT=on. Keep it on; trust server cert to ease self-signed.
+      SQLCMDENCRYPT: "true"
+      SQLCMDTRUSTSERVERCERT: "true"
     steps:
       - name: Install tools (sqlcmd + netcat)
         run: |
@@ -19,33 +29,17 @@ jobs:
           source ~/.bashrc
 
       - name: Show target (masked) + DNS resolve
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-          N: ${{ secrets.STG_DB_NAME }}
         run: |
           echo "Target port: $P"
           echo "Resolving host…"
           getent hosts "$H" || echo "DNS: unable to resolve $H"
 
       - name: TCP port check (nc)
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
         run: |
           echo "Checking TCP ${H}:${P}…"
           nc -vz -w5 "$H" "$P" && echo "TCP OK" || (echo "TCP FAILED" && exit 1)
 
       - name: Try sqlcmd login (SELECT 1)
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-          D: ${{ secrets.STG_DB_NAME }}
-          U: ${{ secrets.STG_DB_USER }}
-          W: ${{ secrets.STG_DB_PASSWORD }}
-          # sqlcmd v18 default ENCRYPT=on. Keep it on; trust server cert to ease self-signed.
-          SQLCMDENCRYPT: "true"
-          SQLCMDTRUSTSERVERCERT: "true"
         run: |
           /opt/mssql-tools18/bin/sqlcmd \
             -S "${H},${P}" \

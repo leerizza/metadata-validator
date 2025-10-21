@@ -54,14 +54,13 @@ jobs:
           D: ${{ secrets.STG_DB_NAME }}
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
-          USE_INTEGRATED: ${{ vars.USE_INTEGRATED }}   # repo/org env var: "true" or "false"
+          USE_INTEGRATED: ${{ vars.USE_INTEGRATED }}   # "true"/"false" (repo/org variable)
         run: |
           $ErrorActionPreference = "Stop"
           $port = if ([string]::IsNullOrWhiteSpace($env:P)) { "1433" } else { $env:P }
           if ($port -notmatch '^\d+$') { throw "STG_DB_PORT invalid: '$port'" }
           $server = "$($env:H),$port"
 
-          # Ambil & sort skrip
           $scripts = Get-ChildItem -Path "deploy" -Filter "*.sql" | Sort-Object Name
           if (-not $scripts) {
             "No SQL files in deploy/. Skipping staging deploy." | Out-File -FilePath deploy-summary.md -Encoding utf8
@@ -98,8 +97,8 @@ jobs:
           JOIN sys.schemas s ON s.schema_id = t.schema_id
           WHERE t.create_date >= DATEADD(MINUTE, -30, SYSUTCDATETIME())
              OR t.modify_date >= DATEADD(MINUTE, -30, SYSUTCDATETIME())
-          ORDER BY t.modify_date DESC, t.create_date DESC; "@
-
+          ORDER BY t.modify_date DESC, t.create_date DESC;
+"@
           $baseArgs2 = @("-S", $server, "-d", $env:D, "-l", "15", "-b", "-C", "-h", "-1", "-W", "-s", " | ", "-Q", $qry)
           if (($env:USE_INTEGRATED).ToString().ToLower() -eq "true") { $args2 = $baseArgs2 + "-E" } else { $args2 = $baseArgs2 + @("-U", $env:U, "-P", $env:W) }
           try { (& sqlcmd @args2) | Out-File -Append deploy-summary.md -Encoding utf8 } catch { "_(No recent changes or query failed)_" | Out-File -Append deploy-summary.md -Encoding utf8 }
