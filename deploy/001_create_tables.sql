@@ -4,6 +4,6 @@ BEGIN
   CREATE TABLE [dbo].[dim_customer] (
     id INT NOT NULL PRIMARY KEY,
     full_name VARCHAR(MAX) NOT NULL,
-    email VARCHAR(200) NULL
+    email VARCHAR(MAX) NULL
   );
 END;
