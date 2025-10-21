@@ -5,7 +5,7 @@ columns:
     type: int
     nullable: false
   - name: full_name
-    type: varchar(200)
+    type: varchar(MAX)
     nullable: false
   - name: email
     type: varchar(200)
