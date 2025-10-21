@@ -10,8 +10,6 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    outputs:
-      junit_path: report-metadata.xml
     steps:
       - uses: actions/checkout@v4
 
@@ -85,11 +83,18 @@ jobs:
           echo "**Executed files:**" >> deploy-summary.md
           for f in "${SCRIPTS[@]}"; do
             echo "- \`${f}\`" >> deploy-summary.md
-            /opt/mssql-tools18/bin/sqlcmd               -S "${DB_HOST},${DB_PORT}"               -d "${DB_NAME}"               -U "${DB_USER}"               -P "${DB_PASSWORD}"               -l 30 -b -C               -i "$f"
+            /opt/mssql-tools18/bin/sqlcmd \
+              -S "${DB_HOST},${DB_PORT}" \
+              -d "${DB_NAME}" \
+              -U "${DB_USER}" \
+              -P "${DB_PASSWORD}" \
+              -l 30 -b -C \
+              -i "$f"
           done
           echo "" >> deploy-summary.md
           echo "**Recent objects (created/modified in last 30 minutes)**" >> deploy-summary.md
-          /opt/mssql-tools18/bin/sqlcmd             -S "${DB_HOST},${DB_PORT}" -d "${DB_NAME}" -U "${DB_USER}" -P "${DB_PASSWORD}" -l 15 -C -h-1 -W -s ' | ' -Q "
+          /opt/mssql-tools18/bin/sqlcmd \
+            -S "${DB_HOST},${DB_PORT}" -d "${DB_NAME}" -U "${DB_USER}" -P "${DB_PASSWORD}" -l 15 -C -h-1 -W -s ' | ' -Q "
               SET NOCOUNT ON;
               SELECT TOP (30)
                 s.name + '.' + t.name AS table_name,
@@ -113,21 +118,19 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const core = require('@actions/core');
-            let body = `### ✅ Validator passed & Staging Deploy
-**Workflow:** ${process.env.GITHUB_WORKFLOW}
-
-`;
+            const header = "### ✅ Validator passed & Staging Deploy\n" +
+                           "**Workflow:** " + process.env.GITHUB_WORKFLOW + "\n\n";
+            let body = header;
             try {
               const sum = fs.readFileSync('deploy-summary.md', 'utf8');
               body += sum;
             } catch (e) {
-              body += '_No deploy summary found._';
+              body += "_No deploy summary found._";
             }
-            const pr = context.payload.pull_request.number;
+            const prNumber = context.payload.pull_request.number;
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: pr,
+              issue_number: prNumber,
               body
             });
