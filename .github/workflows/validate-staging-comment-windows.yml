@@ -16,6 +16,7 @@ jobs:
     runs-on: [self-hosted, Windows]
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -52,24 +53,26 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Ensure sqlcmd is available (detect or install)
-        run: |
-          where sqlcmd >NUL 2>&1 && (for /f "delims=" %%A in ('where sqlcmd') do (echo SQLCMD_EXE=%%A>>%GITHUB_ENV)) && goto :done_sqlcmd
-          powershell -ExecutionPolicy Bypass -NoProfile -Command ^
-            "$ErrorActionPreference='Stop';" ^
-            "$paths = @(" ^
-            "'$env:ProgramFiles\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\sqlcmd.exe'," ^
-            "'$env:ProgramFiles\\Microsoft SQL Server\\160\\Tools\\Binn\\sqlcmd.exe'," ^
-            "'$env:ProgramFiles\\Microsoft SQL Server\\150\\Tools\\Binn\\sqlcmd.exe'" ^
-            ");" ^
-            "$exe = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1;" ^
-            "if (-not $exe) {" ^
-            "  try { winget install Microsoft.SQLServer.CommandLineTools --accept-package-agreements --accept-source-agreements -h 0 } catch { Write-Host 'winget failed or blocked'; }" ^
-            "  $exe = (Get-Command sqlcmd -ErrorAction SilentlyContinue).Source" ^
-            "};" ^
-            "if (-not $exe) { throw 'sqlcmd not found. Install it on the runner.' };" ^
-            "[IO.File]::AppendAllText($env:GITHUB_ENV, 'SQLCMD_EXE=' + $exe + \"`n\");" ^
-            "Write-Host ('Using sqlcmd: {0}' -f $exe);"
-          :done_sqlcmd
+        run: >
+          powershell -ExecutionPolicy Bypass -NoProfile -Command
+          "$ErrorActionPreference='Stop';
+           $exe=$null;
+           $pref='${{ vars.SQLCMD_EXE }}'; if($pref -and (Test-Path $pref)){ $exe=$pref };
+           if(-not $exe){ $exe=(Get-Command sqlcmd -ErrorAction SilentlyContinue).Source };
+           if(-not $exe){
+             $paths=@(
+               (Join-Path $env:ProgramFiles 'Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe'),
+               (Join-Path $env:ProgramFiles 'Microsoft SQL Server\160\Tools\Binn\sqlcmd.exe'),
+               (Join-Path $env:ProgramFiles 'Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe')
+             ); $exe = $paths | ? { Test-Path $_ } | Select-Object -First 1
+           };
+           if(-not $exe){
+             try { winget install Microsoft.SQLServer.CommandLineTools --accept-package-agreements --accept-source-agreements -h 0 } catch { Write-Host 'winget blocked/failed'; };
+             $exe=(Get-Command sqlcmd -ErrorAction SilentlyContinue).Source
+           };
+           if(-not $exe){ throw 'sqlcmd not found. Install the tools or set repo variable SQLCMD_EXE.' };
+           [IO.File]::AppendAllText($env:GITHUB_ENV,'SQLCMD_EXE='+$exe+\"`n\");
+           Write-Host ('Using sqlcmd: {0}' -f $exe)"
 
       - name: Deploy to STAGING (deploy\*.sql sorted)
         id: deploy
