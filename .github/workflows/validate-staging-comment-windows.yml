@@ -16,10 +16,10 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install deps
-        shell: pwsh
+        shell: powershell
         run: pip install -r requirements.txt
       - name: Run validator (scan changed SQL only)
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           git fetch --no-tags --prune --depth=1 origin ${{ github.base_ref }}
@@ -47,7 +47,7 @@ jobs:
 
       - name: Deploy to STAGING (deploy\*.sql sorted)
         id: deploy
-        shell: pwsh
+        shell: powershell
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
