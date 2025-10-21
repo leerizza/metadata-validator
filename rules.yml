@@ -1,0 +1,19 @@
+engine: sqlserver
+table_name:
+  pattern: '^[a-z][a-z0-9_]*$'
+  min_length: 3
+  max_length: 63
+  allow_schema_prefix: true
+  allowed_prefixes: ["stg_", "dim_", "fact_"]
+  forbidden_substrings: ["test__", "__tmp", " "]
+datatype:
+  disallowed_regex:
+    - '(?i)\btext\b'
+    - '(?i)\bnt?text\b'
+    - '(?i)\bimage\b'
+    - '(?i)\b(varchar|nvarchar)\s*\(\s*max\s*\)'
+  varchar_max_length: 255
+  allow_unbounded_types: false
+files:
+  include_globs: ["**/*.sql"]
+  exclude_globs: ["migrations/**", "archive/**"]
