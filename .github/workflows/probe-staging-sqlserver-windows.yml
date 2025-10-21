@@ -8,7 +8,6 @@ on:
         required: false
         default: "false"
 
-# Jalankan perintah lewat cmd, lalu panggil PowerShell dengan Bypass
 defaults:
   run:
     shell: cmd
@@ -21,40 +20,38 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Ensure sqlcmd is available (detect or install)
-        run: >
-          powershell -ExecutionPolicy Bypass -Command
-          "$ErrorActionPreference='Stop';
-           function Save-Env([string]$k,[string]$v){ [IO.File]::AppendAllText($env:GITHUB_ENV, \"$k=$v`n\") }
-           $candidates = @(
-             (Join-Path $env:ProgramFiles 'Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe'),
-             (Join-Path $env:ProgramFiles 'Microsoft SQL Server\160\Tools\Binn\sqlcmd.exe'),
-             (Join-Path $env:ProgramFiles 'Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe'),
-             (Join-Path $env:ProgramFiles 'Microsoft SQL Server\110\Tools\Binn\sqlcmd.exe')
-           ) + (Get-Command sqlcmd -ErrorAction SilentlyContinue | % Source)
-           $exe = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-           if(-not $exe){
-             Write-Host 'sqlcmd not found — installing via winget...';
-             try{
-               winget install Microsoft.SQLServer.CommandLineTools --accept-package-agreements --accept-source-agreements -h 0
-             } catch {
-               throw 'winget install failed. Install sqlcmd secara manual di mesin runner, lalu rerun.'
-             }
-             $exe = (Get-Command sqlcmd -ErrorAction SilentlyContinue | % Source)
-           }
-           if(-not $exe){ throw 'sqlcmd still not found after install.' }
-           Write-Host ('Using sqlcmd: {0}' -f $exe);
-           Save-Env 'SQLCMD_EXE' $exe"
+        run: |
+          rem 1) Jika sqlcmd sudah ada di PATH, pakai itu
+          where sqlcmd >NUL 2>&1 && (for /f "delims=" %%A in ('where sqlcmd') do (echo SQLCMD_EXE=%%A>>%GITHUB_ENV)) && goto :done_sqlcmd
+
+          rem 2) Coba cari di folder instalasi umum / install via winget
+          powershell -ExecutionPolicy Bypass -NoProfile -Command ^
+            "$ErrorActionPreference='Stop';" ^
+            "$paths = @(" ^
+            "'$env:ProgramFiles\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\sqlcmd.exe'," ^
+            "'$env:ProgramFiles\\Microsoft SQL Server\\160\\Tools\\Binn\\sqlcmd.exe'," ^
+            "'$env:ProgramFiles\\Microsoft SQL Server\\150\\Tools\\Binn\\sqlcmd.exe'" ^
+            ");" ^
+            "$exe = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1;" ^
+            "if (-not $exe) {" ^
+            "  try { winget install Microsoft.SQLServer.CommandLineTools --accept-package-agreements --accept-source-agreements -h 0 } catch { Write-Host 'winget failed or blocked'; }" ^
+            "  $exe = (Get-Command sqlcmd -ErrorAction SilentlyContinue).Source" ^
+            "};" ^
+            "if (-not $exe) { throw 'sqlcmd not found. Install it on the runner.' };" ^
+            "[IO.File]::AppendAllText($env:GITHUB_ENV, 'SQLCMD_EXE=' + $exe + \"`n\");" ^
+            "Write-Host ('Using sqlcmd: {0}' -f $exe);"
+          :done_sqlcmd
 
       - name: Tool check (sqlcmd)
         run: >
-          powershell -ExecutionPolicy Bypass -Command
+          powershell -ExecutionPolicy Bypass -NoProfile -Command
           "$ErrorActionPreference='Stop'; & $env:SQLCMD_EXE -? | Out-Null; Write-Host 'sqlcmd OK'"
 
       - name: DNS resolve
         env:
           H: ${{ secrets.STG_DB_HOST }}
         run: >
-          powershell -ExecutionPolicy Bypass -Command
+          powershell -ExecutionPolicy Bypass -NoProfile -Command
           "$ErrorActionPreference='Stop';
            if([string]::IsNullOrWhiteSpace($env:H)){ throw 'Secret STG_DB_HOST tidak di-set' };
            try { Resolve-DnsName $env:H -ErrorAction Stop | Select-Object -First 3 | Format-Table -AutoSize }
@@ -65,7 +62,7 @@ jobs:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
         run: >
-          powershell -ExecutionPolicy Bypass -Command
+          powershell -ExecutionPolicy Bypass -NoProfile -Command
           "$ErrorActionPreference='Stop';
            $port= if([string]::IsNullOrWhiteSpace($env:P)){'1433'} else {$env:P};
            if($port -notmatch '^\d+$'){ throw ('STG_DB_PORT invalid: {0}' -f $port) };
@@ -81,7 +78,7 @@ jobs:
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
         run: >
-          powershell -ExecutionPolicy Bypass -Command
+          powershell -ExecutionPolicy Bypass -NoProfile -Command
           "$ErrorActionPreference='Stop';
            $useIntegrated = '${{ github.event.inputs.use_integrated }}'.ToLower() -eq 'true';
            $port= if([string]::IsNullOrWhiteSpace($env:P)){'1433'} else {$env:P};
