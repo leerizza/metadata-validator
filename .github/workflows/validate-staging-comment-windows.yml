@@ -1,133 +1,142 @@
-name: Probe STAGING SQL Server (Windows Self-Hosted)
+name: Validate → Deploy STAGING → Comment PR (Windows Self-Hosted)
 
 on:
-  workflow_dispatch:
-    inputs:
-      use_integrated:
-        description: "Gunakan Windows Integrated Auth (true/false)"
-        required: false
-        default: "false"
+  pull_request:
+    paths:
+      - "**/*.sql"
+      - "rules.yml"
+      - "validate_sql.py"
+
+defaults:
+  run:
+    shell: cmd
 
 jobs:
-  probe:
+  validate:
+    runs-on: [self-hosted, Windows]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run validator (scan changed SQL only)
+        run: >
+          powershell -ExecutionPolicy Bypass -NoProfile -Command
+          "$ErrorActionPreference='Stop';
+           git fetch --no-tags --prune --depth=1 origin ${{ github.base_ref }};
+           $changed = git diff --name-only origin/${{ github.base_ref }}... | Select-String -Pattern '\.sql$' | % { $_.ToString() };
+           if($changed){
+             Write-Host 'Changed SQL files:'; $changed | % { Write-Host $_ };
+             python validate_sql.py --junit report-metadata.xml --files $changed
+           } else {
+             Write-Host 'No changed SQL files, scanning all *.sql';
+             python validate_sql.py --junit report-metadata.xml
+           }"
+
+      - name: Upload JUnit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit
+          path: report-metadata.xml
+
+  deploy_staging:
+    if: github.event_name == 'pull_request'
+    needs: validate
     runs-on: [self-hosted, Windows]
     environment: staging
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Ensure sqlcmd is available (detect or install)
-        shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "🔍 Checking sqlcmd availability..."
+          where sqlcmd >NUL 2>&1 && (for /f "delims=" %%A in ('where sqlcmd') do (echo SQLCMD_EXE=%%A>>%GITHUB_ENV)) && goto :done_sqlcmd
+          powershell -ExecutionPolicy Bypass -NoProfile -Command ^
+            "$ErrorActionPreference='Stop';" ^
+            "$paths = @(" ^
+            "'$env:ProgramFiles\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\sqlcmd.exe'," ^
+            "'$env:ProgramFiles\\Microsoft SQL Server\\160\\Tools\\Binn\\sqlcmd.exe'," ^
+            "'$env:ProgramFiles\\Microsoft SQL Server\\150\\Tools\\Binn\\sqlcmd.exe'" ^
+            ");" ^
+            "$exe = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1;" ^
+            "if (-not $exe) {" ^
+            "  try { winget install Microsoft.SQLServer.CommandLineTools --accept-package-agreements --accept-source-agreements -h 0 } catch { Write-Host 'winget failed or blocked'; }" ^
+            "  $exe = (Get-Command sqlcmd -ErrorAction SilentlyContinue).Source" ^
+            "};" ^
+            "if (-not $exe) { throw 'sqlcmd not found. Install it on the runner.' };" ^
+            "[IO.File]::AppendAllText($env:GITHUB_ENV, 'SQLCMD_EXE=' + $exe + \"`n\");" ^
+            "Write-Host ('Using sqlcmd: {0}' -f $exe);"
+          :done_sqlcmd
 
-          # 0) Honor repo variable if defined
-          $pref = "${{ vars.SQLCMD_EXE }}"
-          if ($pref -and (Test-Path $pref)) {
-              $exe = $pref
-              Write-Host "✅ Using sqlcmd from repo variable: $exe"
-          }
-
-          # 1) Try PATH
-          if (-not $exe) {
-              try { $exe = (Get-Command sqlcmd -ErrorAction SilentlyContinue).Source } catch {}
-          }
-
-          # 2) Try common install folders
-          if (-not $exe) {
-              $paths = @(
-                  "$env:ProgramFiles\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe",
-                  "$env:ProgramFiles\Microsoft SQL Server\160\Tools\Binn\sqlcmd.exe",
-                  "$env:ProgramFiles\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe"
-              )
-              $exe = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
-          }
-
-          # 3) Try winget install
-          if (-not $exe) {
-              Write-Host "⚙️ sqlcmd not found, attempting winget install..."
-              try {
-                  winget install Microsoft.SQLServer.CommandLineTools --accept-package-agreements --accept-source-agreements -h 0
-                  $exe = (Get-Command sqlcmd -ErrorAction SilentlyContinue).Source
-              } catch {
-                  Write-Warning "⚠️ Winget not available or install failed. Please install manually."
-              }
-          }
-
-          if (-not $exe) {
-              throw "❌ sqlcmd not found. Please install SQL Server Command Line Utilities or define SQLCMD_EXE variable."
-          }
-
-          Write-Host "✅ sqlcmd found at: $exe"
-          "SQLCMD_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Tool check (sqlcmd)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "🔧 Checking sqlcmd tool..."
-          & $env:SQLCMD_EXE -? | Out-Null
-          Write-Host "✅ sqlcmd is working!"
-
-      - name: DNS resolve
-        shell: pwsh
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (-not $env:H) { throw "❌ Secret STG_DB_HOST not set" }
-          Write-Host "🔎 Resolving DNS for $env:H..."
-          try {
-              Resolve-DnsName $env:H -ErrorAction Stop | Select-Object -First 3 | Format-Table -AutoSize
-          } catch {
-              Write-Warning "⚠️ DNS resolve failed: $($_.Exception.Message)"
-          }
-
-      - name: TCP port check
-        shell: pwsh
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $port = if ($env:P) { $env:P } else { "1433" }
-          if ($port -notmatch "^\d+$") { throw "Invalid port: $port" }
-          Write-Host "🌐 Checking TCP connection to $env:H:$port..."
-          if (-not (Test-NetConnection -ComputerName $env:H -Port $port -InformationLevel Quiet)) {
-              throw "❌ TCP connection failed"
-          }
-          Write-Host "✅ TCP port $port reachable!"
-
-      - name: Try sqlcmd login (SELECT 1)
-        shell: pwsh
+      - name: Deploy to STAGING (deploy\*.sql sorted)
+        id: deploy
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
           D: ${{ secrets.STG_DB_NAME }}
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $useIntegrated = "${{ github.event.inputs.use_integrated }}".ToLower() -eq "true"
-          $port = if ($env:P) { $env:P } else { "1433" }
-          $server = "$($env:H),$port"
+          USE_INTEGRATED: ${{ vars.USE_INTEGRATED }}   # "true"/"false"
+        run: >
+          powershell -ExecutionPolicy Bypass -NoProfile -Command
+          "$ErrorActionPreference='Stop';
+           $port= if([string]::IsNullOrWhiteSpace($env:P)){'1433'} else {$env:P};
+           if($port -notmatch '^\d+$'){ throw ('STG_DB_PORT invalid: {0}' -f $port) };
+           $server = '{0},{1}' -f $env:H,$port;
+           $scripts = Get-ChildItem -Path 'deploy' -Filter '*.sql' | Sort-Object Name;
+           if(-not $scripts){ 'No SQL files in deploy/. Skipping staging deploy.' | Out-File -FilePath deploy-summary.md -Encoding utf8; exit 0 }
+           '## Staging Deploy`n' | Out-File -FilePath deploy-summary.md -Encoding utf8;
+           ('**Target:** {0}/{1}`n' -f $server,$env:D) | Out-File -Append deploy-summary.md -Encoding utf8;
+           '**Executed files:**' | Out-File -Append deploy-summary.md -Encoding utf8;
+           foreach($s in $scripts){
+             ('- `{0}`' -f ($s.FullName -replace '\\','/')) | Out-File -Append deploy-summary.md -Encoding utf8;
+             $base = @('-S',$server,'-d',$env:D,'-l','30','-b','-C','-i',$s.FullName);
+             if(($env:USE_INTEGRATED).ToString().ToLower() -eq 'true'){ $args = $base + '-E' }
+             else {
+               if([string]::IsNullOrWhiteSpace($env:U) -or [string]::IsNullOrWhiteSpace($env:W)){ throw 'SQL Auth dipilih tapi STG_DB_USER/PASSWORD kosong' }
+               $args = $base + @('-U',$env:U,'-P',$env:W)
+             }
+             & $env:SQLCMD_EXE @args; if($LASTEXITCODE -ne 0){ throw ('sqlcmd failed on {0} with exit code {1}' -f $s.Name,$LASTEXITCODE) }
+           }
+           '`n**Recent objects (created/modified in last 30 minutes)**' | Out-File -Append deploy-summary.md -Encoding utf8;
+           $qry = @'
+           SET NOCOUNT ON;
+           SELECT TOP (30)
+             s.name + '.' + t.name AS table_name,
+             t.create_date,
+             t.modify_date
+           FROM sys.tables t
+           JOIN sys.schemas s ON s.schema_id = t.schema_id
+           WHERE t.create_date >= DATEADD(MINUTE, -30, SYSUTCDATETIME())
+              OR t.modify_date >= DATEADD(MINUTE, -30, SYSUTCDATETIME())
+           ORDER BY t.modify_date DESC, t.create_date DESC;
+'@;
+           $base2 = @('-S',$server,'-d',$env:D,'-l','15','-b','-C','-h','-1','-W','-s',' | ','-Q',$qry);
+           if(($env:USE_INTEGRATED).ToString().ToLower() -eq 'true'){ $args2 = $base2 + '-E' } else { $args2 = $base2 + @('-U',$env:U,'-P',$env:W) }
+           try { (& $env:SQLCMD_EXE @args2) | Out-File -Append deploy-summary.md -Encoding utf8 } catch { '_(No recent changes or query failed)_' | Out-File -Append deploy-summary.md -Encoding utf8 }"
 
-          Write-Host "🧩 Testing SQL login to $server / $env:D"
+      - name: Upload deploy summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-deploy-summary
+          path: deploy-summary.md
 
-          $base = @("-S", $server, "-d", $env:D, "-l", "10", "-b", "-C")
-          if ($useIntegrated) {
-              $args = $base + "-E"
-          } else {
-              if (-not $env:U -or -not $env:W) { throw "Missing credentials for SQL Auth" }
-              $args = $base + @("-U", $env:U, "-P", $env:W)
-          }
-
-          $args += @("-Q", "SET NOCOUNT ON; SELECT 1 AS ok, DB_NAME() AS db, SYSTEM_USER AS login;")
-
-          Write-Host "📤 Running: $env:SQLCMD_EXE $($args -join ' ')"
-          & $env:SQLCMD_EXE @args
-          if ($LASTEXITCODE -ne 0) {
-              throw "❌ sqlcmd failed with exit code $LASTEXITCODE"
-          }
-          Write-Host "✅ SELECT 1 query success!"
+      - name: Comment on PR with validator + staging deploy summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const header = "### ✅ Validator passed & Staging Deploy (Windows self-hosted)\n" +
+                           "**Workflow:** " + process.env.GITHUB_WORKFLOW + "\n\n";
+            let body = header;
+            try { body += fs.readFileSync('deploy-summary.md', 'utf8'); }
+            catch { body += "_No deploy summary found._"; }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body
+            });
