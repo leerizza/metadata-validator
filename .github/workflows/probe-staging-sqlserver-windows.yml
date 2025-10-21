@@ -8,7 +8,7 @@ on:
         required: false
         default: "false"
 
-# Pakai shell cmd secara default; semua perintah dipanggil via powershell -ExecutionPolicy Bypass
+# Jalankan perintah lewat cmd, lalu panggil PowerShell dengan Bypass
 defaults:
   run:
     shell: cmd
@@ -20,10 +20,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Ensure sqlcmd is available (detect or install)
+        run: >
+          powershell -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           function Save-Env([string]$k,[string]$v){ [IO.File]::AppendAllText($env:GITHUB_ENV, \"$k=$v`n\") }
+           $candidates = @(
+             (Join-Path $env:ProgramFiles 'Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe'),
+             (Join-Path $env:ProgramFiles 'Microsoft SQL Server\160\Tools\Binn\sqlcmd.exe'),
+             (Join-Path $env:ProgramFiles 'Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe'),
+             (Join-Path $env:ProgramFiles 'Microsoft SQL Server\110\Tools\Binn\sqlcmd.exe')
+           ) + (Get-Command sqlcmd -ErrorAction SilentlyContinue | % Source)
+           $exe = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+           if(-not $exe){
+             Write-Host 'sqlcmd not found — installing via winget...';
+             try{
+               winget install Microsoft.SQLServer.CommandLineTools --accept-package-agreements --accept-source-agreements -h 0
+             } catch {
+               throw 'winget install failed. Install sqlcmd secara manual di mesin runner, lalu rerun.'
+             }
+             $exe = (Get-Command sqlcmd -ErrorAction SilentlyContinue | % Source)
+           }
+           if(-not $exe){ throw 'sqlcmd still not found after install.' }
+           Write-Host ('Using sqlcmd: {0}' -f $exe);
+           Save-Env 'SQLCMD_EXE' $exe"
+
       - name: Tool check (sqlcmd)
         run: >
           powershell -ExecutionPolicy Bypass -Command
-          "$ErrorActionPreference='Stop'; sqlcmd -? | Out-Null; Write-Host 'sqlcmd OK'"
+          "$ErrorActionPreference='Stop'; & $env:SQLCMD_EXE -? | Out-Null; Write-Host 'sqlcmd OK'"
 
       - name: DNS resolve
         env:
@@ -69,7 +94,7 @@ jobs:
              $args = $base + @('-U',$env:U,'-P',$env:W)
            }
            $args = $args + @('-Q','SET NOCOUNT ON; SELECT 1 AS ok, DB_NAME() AS db, SYSTEM_USER AS login;');
-           Write-Host ('Running: sqlcmd {0} (Integrated={1})' -f $server,$useIntegrated);
-           & sqlcmd @args;
+           Write-Host ('Running: {0} {1}' -f $env:SQLCMD_EXE, ($args -join ' '));
+           & $env:SQLCMD_EXE @args;
            if($LASTEXITCODE -ne 0){ throw ('sqlcmd failed with exit code {0}' -f $LASTEXITCODE) };
            Write-Host 'SELECT 1 OK'"
