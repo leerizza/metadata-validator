@@ -82,7 +82,6 @@ jobs:
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
 
-          rem -- SQL satu baris; aman dari parser CMD
           set "SQL=SET NOCOUNT ON; SELECT TOP (50) s.name + '.' + t.name AS table_name, t.create_date, t.modify_date FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE t.create_date >= DATEADD(MINUTE, -60, SYSUTCDATETIME()) OR t.modify_date >= DATEADD(MINUTE, -60, SYSUTCDATETIME()) ORDER BY t.modify_date DESC, t.create_date DESC;"
 
           "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -h -1 -W -s " | " -Q "%SQL%" >> deploy-summary.md
