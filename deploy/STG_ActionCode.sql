@@ -10,7 +10,8 @@ CREATE TABLE [dbo].[STG_ActionCode](
 	[ActionState] [varchar](50) NULL,
 	[StatusWeight] [int] NULL,
 	[Priority] [int] NULL
-) ON [PRIMARY]
-GO
+) ON [PRIMARY];
+END;
+
 
 
