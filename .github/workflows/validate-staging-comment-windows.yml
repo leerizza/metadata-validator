@@ -140,18 +140,32 @@ jobs:
 
       # Guard — block tipe terlarang pada deploy/*.sql
       - name: Block disallowed types in deploy SQL (no MAX, no legacy LOB)
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           Write-Host "🔍 Scanning deploy SQL for disallowed patterns..."
-          
-          $bad = Get-ChildItem 'deploy/*.sql' | Select-String -Pattern 'varchar\s*\(max\)' -SimpleMatch
-          $re = Get-ChildItem 'deploy/*.sql' | Select-String -Pattern 'text|ntext|image' -SimpleMatch
 
-          if ($bad -or $re) {
-            Write-Error "🚫 Found disallowed type(s) in SQL files!"
-            if ($bad) { Write-Host "→ varchar(max) found in:"; $bad | ForEach-Object { $_.Path } }
-            if ($re) { Write-Host "→ legacy text/ntext/image found in:"; $re | ForEach-Object { $_.Path } }
+          # Ambil semua file deploy/*.sql (rekursif); kalau tidak ada, langsung lolos
+          $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse -ErrorAction SilentlyContinue
+          if (-not $files) {
+            Write-Host "ℹ️  No SQL files under deploy/."
+            exit 0
+          }
+
+          # Cari pola terlarang
+          $bad    = $files | Select-String -Pattern '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)' -AllMatches
+          $legacy = $files | Select-String -Pattern '\b(?:text|ntext|image)\b' -AllMatches
+
+          if ($bad -or $legacy) {
+            Write-Host "🚫 Found disallowed type(s) in SQL files!"
+            if ($bad) {
+              Write-Host "→ varchar(max)/nvarchar(max)/varbinary(max) in:"
+              $bad | ForEach-Object { $_.Path } | Sort-Object -Unique | ForEach-Object { Write-Host " - $_" }
+            }
+            if ($legacy) {
+              Write-Host "→ legacy text/ntext/image in:"
+              $legacy | ForEach-Object { $_.Path } | Sort-Object -Unique | ForEach-Object { Write-Host " - $_" }
+            }
             exit 1
           }
 
