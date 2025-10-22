@@ -142,10 +142,10 @@ jobs:
           W: ${{ secrets.STG_DB_PASSWORD }}
           LOGDIR: ${{ env.LOGDIR }}
         run: |
-          $ErrorActionPreference='Stop'
+          $ErrorActionPreference = 'Stop'
           $port = if ($env:P) { $env:P } else { "1433" }
+          if (-not (Test-Path $env:LOGDIR)) { New-Item -ItemType Directory -Path $env:LOGDIR | Out-Null }
 
-          # kumpulkan file
           $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -ErrorAction SilentlyContinue
           if (-not $files) {
             "No SQL to parse." | Tee-Object -FilePath (Join-Path $env:LOGDIR "parseonly.log") -Append
@@ -153,40 +153,46 @@ jobs:
           }
 
           $master = Join-Path $env:LOGDIR "parseonly.log"
-          "== PARSE-ONLY / NOEXEC ==" | Set-Content -Path $master -Encoding ASCII
-          "Server=$($env:H), Port=$port, DB=$($env:D)" | Add-Content -Path $master -Encoding ASCII
-          "sqlcmd=$env:SQLCMD_EXE" | Add-Content -Path $master -Encoding ASCII
-          "" | Add-Content -Path $master -Encoding ASCII
+          "== PARSE ONLY via wrapper (-i) ==" | Set-Content -Path $master -Encoding UTF8
+          "Server=$($env:H), Port=$port, DB=$($env:D)" | Add-Content -Path $master -Encoding UTF8
+          "sqlcmd=$env:SQLCMD_EXE" | Add-Content -Path $master -Encoding UTF8
+          "" | Add-Content -Path $master -Encoding UTF8
 
           foreach ($f in $files) {
-            $filePath = $f.FullName
+            $src  = $f.FullName
             $wrap = Join-Path $env:LOGDIR ("__parse_" + $f.BaseName + ".sql")
             $out  = Join-Path $env:LOGDIR ("parse_" + $f.BaseName + ".log")
 
-            # wrapper: compile-only (NOEXEC). :ON ERROR EXIT agar sqlcmd return code > 0 saat ada error
+            # Build wrapper: NOEXEC + :r (must be executed with -i so :r is parsed)
             @(
               ":ON ERROR EXIT",
               "SET NOEXEC ON",
-              ":r `"$filePath`"",
+              ":r `"$src`"",
               "SET NOEXEC OFF"
-            ) | Set-Content -Path $wrap -Encoding ASCII
+            ) | Set-Content -Path $wrap -Encoding UTF8
 
-            "PARSEONLY -> $filePath" | Tee-Object -FilePath $master -Append
+            # Echo what we are about to run (debug)
+            "WRAPPER: $wrap"        | Tee-Object -FilePath $master -Append
+            "SOURCE : $src"         | Tee-Object -FilePath $master -Append
+            "----- wrapper content begin -----" | Tee-Object -FilePath $master -Append
+            Get-Content -Path $wrap | Tee-Object -FilePath $master -Append
+            "----- wrapper content end   -----" | Tee-Object -FilePath $master -Append
 
-            # -b : fail on error, -C : trust cert, -f 65001 : input file UTF-8
+            # Run wrapper with -i (NOT -Q), so :r is honored. -b to fail on error, -C trust cert, -f 65001 (UTF-8)
             & "$env:SQLCMD_EXE" `
               -S "$($env:H),$port" -d "$($env:D)" -U "$($env:U)" -P "$env:W" `
               -b -C -i "$wrap" -f 65001 -o "$out"
 
             if ($LASTEXITCODE -ne 0) {
-              "FAILED -> $filePath (see $out)" | Tee-Object -FilePath $master -Append
+              "FAILED -> $src (see $out)" | Tee-Object -FilePath $master -Append
               Get-Content -Path $out -Tail 100 | Tee-Object -FilePath $master -Append
               throw ("Parse failed: {0}" -f $f.Name)
             } else {
-              "OK -> $filePath" | Tee-Object -FilePath $master -Append
+              "OK -> $src" | Tee-Object -FilePath $master -Append
             }
-            "" | Add-Content -Path $master -Encoding ASCII
+            "" | Add-Content -Path $master -Encoding UTF8
           }
+
 
 
       - name: Show parse-only tail on failure
