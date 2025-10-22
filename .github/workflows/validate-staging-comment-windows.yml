@@ -143,33 +143,35 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host "🔍 Scanning deploy SQL for disallowed patterns..."
+          Write-Host 'Scanning deploy SQL for disallowed patterns...'
 
-          # Ambil semua file deploy/*.sql (rekursif); kalau tidak ada, langsung lolos
+          # Ambil semua SQL di folder deploy (rekursif). Kalau tidak ada, lolos.
           $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse -ErrorAction SilentlyContinue
           if (-not $files) {
-            Write-Host "ℹ️  No SQL files under deploy/."
+            Write-Host 'No SQL files under deploy/.'
             exit 0
           }
 
-          # Cari pola terlarang
-          $bad    = $files | Select-String -Pattern '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)' -AllMatches
-          $legacy = $files | Select-String -Pattern '\b(?:text|ntext|image)\b' -AllMatches
+          # Pola larangan
+          $patMax    = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)'
+          $patLegacy = '\b(?:text|ntext|image)\b'
 
-          if ($bad -or $legacy) {
-            Write-Host "🚫 Found disallowed type(s) in SQL files!"
-            if ($bad) {
-              Write-Host "→ varchar(max)/nvarchar(max)/varbinary(max) in:"
-              $bad | ForEach-Object { $_.Path } | Sort-Object -Unique | ForEach-Object { Write-Host " - $_" }
-            }
-            if ($legacy) {
-              Write-Host "→ legacy text/ntext/image in:"
-              $legacy | ForEach-Object { $_.Path } | Sort-Object -Unique | ForEach-Object { Write-Host " - $_" }
-            }
+          # Scan
+          $bad    = Select-String -Path $files.FullName -Pattern $patMax
+          $legacy = Select-String -Path $files.FullName -Pattern $patLegacy
+
+          $hasBad    = ($bad    | Measure-Object).Count -gt 0
+          $hasLegacy = ($legacy | Measure-Object).Count -gt 0
+
+          if ($hasBad -or $hasLegacy) {
+            Write-Host 'Found disallowed type(s) in:'
+            if ($hasBad)    { ($bad.Path    | Sort-Object -Unique) | ForEach-Object { Write-Host " - $_" } }
+            if ($hasLegacy) { ($legacy.Path | Sort-Object -Unique) | ForEach-Object { Write-Host " - $_" } }
             exit 1
           }
 
-          Write-Host "✅ SQL type validation passed."
+          Write-Host 'SQL type validation passed.'
+
 
 
       # ==== DEPLOY ====
