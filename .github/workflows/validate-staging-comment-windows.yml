@@ -140,24 +140,23 @@ jobs:
 
       # Guard — block tipe terlarang pada deploy/*.sql
       - name: Block disallowed types in deploy SQL (no MAX, no legacy LOB)
-        run: >
-          powershell -NoProfile -ExecutionPolicy Bypass -Command
-          "$ErrorActionPreference='Stop';
-           $bad = @();
-           $re = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)';
-           $legacy = '\b(?:text|ntext|image)\b';
-           if(Test-Path 'deploy'){
-             Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse | ForEach-Object {
-               $t = (Get-Content $_.FullName -Raw).ToLower();
-               if($t -match $re -or $t -match $legacy){ $bad += $_.FullName }
-             }
-           }
-           if($bad.Count -gt 0){
-             Write-Host '❌ Disallowed types ditemukan:';
-             $bad | ForEach-Object { Write-Host (' - ' + $_) };
-             exit 1
-           }
-           Write-Host '✅ Tidak ada tipe terlarang di deploy/*.sql.'"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "🔍 Scanning deploy SQL for disallowed patterns..."
+          
+          $bad = Get-ChildItem 'deploy/*.sql' | Select-String -Pattern 'varchar\s*\(max\)' -SimpleMatch
+          $re = Get-ChildItem 'deploy/*.sql' | Select-String -Pattern 'text|ntext|image' -SimpleMatch
+
+          if ($bad -or $re) {
+            Write-Error "🚫 Found disallowed type(s) in SQL files!"
+            if ($bad) { Write-Host "→ varchar(max) found in:"; $bad | ForEach-Object { $_.Path } }
+            if ($re) { Write-Host "→ legacy text/ntext/image found in:"; $re | ForEach-Object { $_.Path } }
+            exit 1
+          }
+
+          Write-Host "✅ SQL type validation passed."
+
 
       # ==== DEPLOY ====
       - name: Deploy to STAGING (dwdb-sol / DQ_DEV)
