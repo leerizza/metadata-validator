@@ -18,6 +18,7 @@ defaults:
 jobs:
   validate:
     runs-on: [self-hosted, Windows]
+
     steps:
       - uses: actions/checkout@v4
 
@@ -28,17 +29,18 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      # (opsional) jalankan validator SQL lama kamu jika masih mau dipakai
+      # (opsional) validator SQL lama
       - name: Run legacy validator (optional)
         continue-on-error: true
         run: >
           python validate_sql.py --junit report.xml
 
-      # ======== BARU: Validasi metadata & generate SQL ke deploy/ ========
+      # ==== VALIDATE METADATA & RENDER SQL KE deploy/ ====
       - name: Generate CREATE TABLE from metadata (PoC)
         run: >
           python scripts/metadata_validate_and_render.py tables deploy
 
+      # Simpan hasil render untuk job berikutnya
       - name: Upload generated SQL
         uses: actions/upload-artifact@v4
         with:
@@ -49,9 +51,18 @@ jobs:
     needs: validate
     runs-on: [self-hosted, Windows]
     environment: staging
+
     steps:
       - uses: actions/checkout@v4
 
+      # Ambil file SQL hasil generate dari job validate
+      - name: Download generated SQL
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-sql
+          path: deploy
+
+      # Pastikan sqlcmd path tersedia untuk STEP BERIKUTNYA
       - name: Use sqlcmd path from repo variable
         run: |
           echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
@@ -59,35 +70,108 @@ jobs:
             echo sqlcmd.exe not found at: ${{ vars.SQLCMD_EXE }}
             exit /b 1
           )
-          echo Using sqlcmd: %SQLCMD_EXE%
 
-      - name: Deploy to STAGING (dwdb-sol / DQ_DEV)
+      # Preflight — tampilkan target
+      - name: Echo target
         env:
-          H: ${{ secrets.STG_DB_HOST }}   # dwdb-sol
-          P: ${{ secrets.STG_DB_PORT }}   # 1433
-          D: ${{ secrets.STG_DB_NAME }}   # DQ_DEV
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
+          D: ${{ secrets.STG_DB_NAME }}
+        run: |
+          set "PORT=%P%"
+          if "%PORT%"=="" set "PORT=1433"
+          if "%H%"=="" ( echo ❌ Secret STG_DB_HOST kosong & exit /b 1 )
+          echo Using sqlcmd: %SQLCMD_EXE%
+          echo Target: %H%,%PORT% / DB=%D%
+
+      # Preflight — DNS
+      - name: DNS resolve
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+        run: nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
+
+      # Preflight — TCP
+      - name: TCP port check
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass -Command
+          "$p='%P%'; if([string]::IsNullOrWhiteSpace($p)){$p='1433'};
+           if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]$p) -InformationLevel Quiet)){ exit 1 }"
+
+      # Preflight — Test login SELECT 1
+      - name: Test sqlcmd login (SELECT 1)
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
+          D: ${{ secrets.STG_DB_NAME }}
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-          for %%F in (deploy\*.sql) do (
-            echo Executing %%~nxF ...
-            "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F"
-            if errorlevel 1 (
-              echo FAILED on %%~nxF
-              exit /b 1
+          "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
+          if errorlevel 1 exit /b 1
+
+      # Guard — block tipe terlarang pada deploy/*.sql
+      - name: Block disallowed types in deploy SQL (no MAX, no legacy LOB)
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           $bad = @();
+           $re = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)';
+           $legacy = '\b(?:text|ntext|image)\b';
+           if(Test-Path 'deploy'){
+             Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse | ForEach-Object {
+               $t = (Get-Content $_.FullName -Raw).ToLower();
+               if($t -match $re -or $t -match $legacy){ $bad += $_.FullName }
+             }
+           }
+           if($bad.Count -gt 0){
+             Write-Host '❌ Disallowed types ditemukan:';
+             $bad | ForEach-Object { Write-Host (' - ' + $_) };
+             exit 1
+           }
+           Write-Host '✅ Tidak ada tipe terlarang di deploy/*.sql.'"
+
+      # ==== DEPLOY ====
+      - name: Deploy to STAGING (dwdb-sol / DQ_DEV)
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
+          D: ${{ secrets.STG_DB_NAME }}
+          U: ${{ secrets.STG_DB_USER }}
+          W: ${{ secrets.STG_DB_PASSWORD }}
+        run: |
+          set "PORT=%P%"
+          if "%PORT%"=="" set "PORT=1433"
+
+          if exist deploy\*.sql (
+            for /f "delims=" %%F in ('dir /b /o:n deploy\*.sql') do (
+              echo Executing %%~nxF ...
+              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%F"
+              if errorlevel 1 (
+                echo ❌ FAILED on %%~nxF
+                exit /b 1
+              )
             )
+          ) else (
+            echo _No SQL files in deploy/._
           )
 
+      # ==== COMMENT PR ====
       - name: Comment on PR (summary)
         uses: actions/github-script@v7
+        env:
+          TARGET_HOST: ${{ secrets.STG_DB_HOST }}
+          TARGET_DB: ${{ secrets.STG_DB_NAME }}
         with:
           script: |
             const body = [
               "### ✅ Metadata validated & tables deployed to **DQ_DEV**",
-              "- Workflow: " + process.env.GITHUB_WORKFLOW,
-              "- Target: `" + process.env.STG_DB_HOST + "` / `" + process.env.STG_DB_NAME + "`",
+              `- Workflow: ${process.env.GITHUB_WORKFLOW}`,
+              `- Target: \`${process.env.TARGET_HOST}\` / \`${process.env.TARGET_DB}\``,
               "",
               "Artifacts: **generated-sql** (lihat tab Artifacts)."
             ].join("\n");
