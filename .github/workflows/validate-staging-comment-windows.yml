@@ -1,6 +1,6 @@
 name: Validate → Deploy STAGING → Comment PR (Windows Self-Hosted)
 
-on: 
+on:
   pull_request:
     paths:
       - "tables/**/*.yml"
@@ -11,86 +11,130 @@ on:
       - "scripts/metadata_validate_and_render.py"
       - ".github/workflows/validate-staging-comment-windows.yml"
 
-defaults:
-  run:
-    shell: cmd
+# Batalkan run lama untuk PR yang sama (hemat runner time)
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}-validate
+  cancel-in-progress: true
 
 permissions:
   contents: read
   issues: write
   pull-requests: write
 
+defaults:
+  run:
+    shell: cmd
+
 jobs:
   validate:
     runs-on: [self-hosted, Windows]
+    timeout-minutes: 20
+
+    outputs:
+      SKIP_DEPLOY: ${{ steps.short.outputs.skip }}
 
     steps:
       - uses: actions/checkout@v4
 
-            # 1) Deteksi Python yang sudah terpasang di runner
-      - name: Resolve Python path (skip WindowsApps alias)
+      # Deteksi perubahan relevan
+      - name: Detect changed files
+        id: cf
+        uses: tj-actions/changed-files@v45
+        with:
+          files: |
+            tables/**.yml
+            tables/**.yaml
+            deploy/**.sql
+            rules.yml
+            validate_sql.py
+            scripts/metadata_validate_and_render.py
+
+      - name: Short-circuit if nothing to validate
+        id: short
+        if: steps.cf.outputs.any_changed == 'false'
         run: |
-          where python || (echo ❌ Python not found in PATH & exit /b 1)
+          echo No relevant changes. Skipping validate.
+          echo skip=true>>%GITHUB_OUTPUT%
+
+      # ==== SETUP PYTHON CEPAT (cache venv + pip) ====
+      - name: Resolve Python path (skip WindowsApps alias)
+        if: steps.short.outputs.skip != 'true'
+        run: |
+          where python || (echo Python not found in PATH & exit /b 1)
           set "PY="
           for /f "delims=" %%i in ('where python') do (
-            rem skip alias dari Microsoft Store
             echo %%i | findstr /i "\\WindowsApps\\" >nul && (rem skip) || (
               set "PY=%%i"
               goto :found
             )
           )
           :found
-          if "%PY%"=="" (echo ❌ No real python.exe found & exit /b 1)
-          echo Using Python: %PY%
+          if "%PY%"=="" (echo No real python.exe found & exit /b 1)
           echo PYTHON_EXE=%PY%>>%GITHUB_ENV%
 
+      - name: Cache pip/venv
+        if: steps.short.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            .venv
+          key: ${{ runner.os }}-py311-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-py311-
 
-      # 2) Buat virtualenv lokal di workspace (tidak perlu admin)
       - name: Create venv and install deps
+        if: steps.short.outputs.skip != 'true'
         run: |
           "%PYTHON_EXE%" --version
-          "%PYTHON_EXE%" -m venv .venv
+          if not exist .venv ("%PYTHON_EXE%" -m venv .venv)
           set "VENV_PY=%CD%\.venv\Scripts\python.exe"
           echo VENV_PY=%VENV_PY%>>%GITHUB_ENV%
           "%VENV_PY%" -m pip install --upgrade pip
           "%VENV_PY%" -m pip install -r requirements.txt
 
-
-      # 3) (opsional) jalankan validator lama kalau masih dipakai
+      # (opsional) validator lama
       - name: Run legacy validator (optional)
+        if: steps.short.outputs.skip != 'true'
         continue-on-error: true
         env:
-          PYTHONUTF8: "1"            # aktifkan UTF-8 mode
-          PYTHONIOENCODING: "UTF-8"  # paksa stdout/stderr UTF-8
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "UTF-8"
         run: |
-          chcp 65001 >NUL            rem set console code page ke UTF-8
+          chcp 65001 >NUL
           "%VENV_PY%" -X utf8 validate_sql.py --junit report.xml
 
+      # (opsional) kalau kamu masih generate SQL via Python, panggil di sini
+      # - name: Generate CREATE TABLE from metadata
+      #   if: steps.short.outputs.skip != 'true'
+      #   run: |
+      #     "%VENV_PY%" scripts/metadata_validate_and_render.py tables deploy
 
-
-      # Simpan hasil render untuk job berikutnya
       - name: Upload generated SQL
+        if: steps.short.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: generated-sql
           path: deploy/*.sql
+          if-no-files-found: ignore
 
   deploy_staging:
     needs: validate
+    if: needs.validate.outputs.SKIP_DEPLOY != 'true'
     runs-on: [self-hosted, Windows]
     environment: staging
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
 
-      # Ambil file SQL hasil generate dari job validate
-      - name: Download generated SQL
+      - name: Download generated SQL (if any)
         uses: actions/download-artifact@v4
         with:
           name: generated-sql
           path: deploy
+        continue-on-error: true
 
-      # Pastikan sqlcmd path tersedia untuk STEP BERIKUTNYA
       - name: Use sqlcmd path from repo variable
         run: |
           echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
@@ -99,7 +143,7 @@ jobs:
             exit /b 1
           )
 
-      # Preflight — tampilkan target
+      # ===== Preflight STAGING =====
       - name: Echo target
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -108,17 +152,15 @@ jobs:
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-          if "%H%"=="" ( echo ❌ Secret STG_DB_HOST kosong & exit /b 1 )
+          if "%H%"=="" ( echo Secret STG_DB_HOST is empty & exit /b 1 )
           echo Using sqlcmd: %SQLCMD_EXE%
           echo Target: %H%,%PORT% / DB=%D%
 
-      # Preflight — DNS
       - name: DNS resolve
         env:
           H: ${{ secrets.STG_DB_HOST }}
-        run: nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
+        run: nslookup %H% || (echo DNS FAILED & exit /b 1)
 
-      # Preflight — TCP
       - name: TCP port check
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -126,10 +168,8 @@ jobs:
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-          echo Checking TCP connection to %H%:%PORT% ...
           powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]'%PORT%') -InformationLevel Quiet)){exit 1}"
 
-      # Preflight — Test login SELECT 1
       - name: Test sqlcmd login (SELECT 1)
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -143,43 +183,49 @@ jobs:
           "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
           if errorlevel 1 exit /b 1
 
-      # Guard — block tipe terlarang pada deploy/*.sql
-      - name: Block disallowed types in deploy SQL (no MAX, no legacy LOB)
+      # ===== QC Guards sebelum eksekusi =====
+      - name: Block disallowed types (MAX, legacy LOB)
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Stop'
-          Write-Host 'Scanning deploy SQL for disallowed patterns...'
-
-          # Ambil semua SQL di folder deploy (rekursif). Kalau tidak ada, lolos.
+          $ErrorActionPreference='Stop'
           $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse -ErrorAction SilentlyContinue
-          if (-not $files) {
-            Write-Host 'No SQL files under deploy/.'
-            exit 0
-          }
-
-          # Pola larangan
+          if (-not $files) { Write-Host 'No SQL files under deploy/.'; exit 0 }
           $patMax    = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)'
           $patLegacy = '\b(?:text|ntext|image)\b'
+          if (Select-String -Path $files.FullName -Pattern $patMax)    { throw 'Contains (var|nvar)char(max)/varbinary(max)' }
+          if (Select-String -Path $files.FullName -Pattern $patLegacy) { throw 'Contains legacy type (text/ntext/image)' }
 
-          # Scan
-          $bad    = Select-String -Path $files.FullName -Pattern $patMax
-          $legacy = Select-String -Path $files.FullName -Pattern $patLegacy
+      - name: Extra guards (optional)
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse -ErrorAction SilentlyContinue
+          if (-not $files) { exit 0 }
+          $badAnsiNulls = '\bSET\s+ANSI_NULLS\s+OFF\b'
+          $badQuotedId  = '\bSET\s+QUOTED_IDENTIFIER\s+OFF\b'
+          if (Select-String -Path $files.FullName -Pattern $badAnsiNulls) { throw 'Found SET ANSI_NULLS OFF' }
+          if (Select-String -Path $files.FullName -Pattern $badQuotedId)  { throw 'Found SET QUOTED_IDENTIFIER OFF' }
 
-          $hasBad    = ($bad    | Measure-Object).Count -gt 0
-          $hasLegacy = ($legacy | Measure-Object).Count -gt 0
-
-          if ($hasBad -or $hasLegacy) {
-            Write-Host 'Found disallowed type(s) in:'
-            if ($hasBad)    { ($bad.Path    | Sort-Object -Unique) | ForEach-Object { Write-Host " - $_" } }
-            if ($hasLegacy) { ($legacy.Path | Sort-Object -Unique) | ForEach-Object { Write-Host " - $_" } }
-            exit 1
+      - name: SQL parse-only (syntax check, no execution)
+        shell: powershell
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
+          D: ${{ secrets.STG_DB_NAME }}
+          U: ${{ secrets.STG_DB_USER }}
+          W: ${{ secrets.STG_DB_PASSWORD }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $port = if ("${env:P}") { $env:P } else { "1433" }
+          $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -ErrorAction SilentlyContinue
+          if (-not $files) { Write-Host "No SQL to parse."; exit 0 }
+          foreach ($f in $files) {
+            Write-Host "PARSEONLY -> $($f.FullName)"
+            & "${env:SQLCMD_EXE}" -S $env:H,$port -d $env:D -U $env:U -P $env:W -b -C -Q "SET PARSEONLY ON; :r `"$($f.FullName)`"; SET PARSEONLY OFF;"
+            if ($LASTEXITCODE -ne 0) { throw "Parse failed: $($f.Name)" }
           }
 
-          Write-Host 'SQL type validation passed.'
-
-
-
-      # ==== DEPLOY ====
+      # ===== DEPLOY STAGING =====
       - name: Deploy to STAGING (dwdb-sol / DQ_DEV)
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -190,13 +236,12 @@ jobs:
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-
           if exist deploy\*.sql (
             for /f "delims=" %%F in ('dir /b /o:n deploy\*.sql') do (
               echo Executing %%~nxF ...
               "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%F"
               if errorlevel 1 (
-                echo ❌ FAILED on %%~nxF
+                echo FAILED on %%~nxF
                 exit /b 1
               )
             )
@@ -204,34 +249,23 @@ jobs:
             echo _No SQL files in deploy/._
           )
 
-      # ==== COMMENT PR ====
+      # ===== COMMENT PR =====
       - name: Comment on PR (summary)
-        if: ${{ github.event_name == 'pull_request' }}   # pastikan hanya saat PR
+        if: ${{ github.event_name == 'pull_request' }}
         uses: actions/github-script@v7
         env:
           TARGET_HOST: ${{ secrets.STG_DB_HOST }}
           TARGET_DB:   ${{ secrets.STG_DB_NAME }}
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}       # ← penting!
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const pr = context.payload.pull_request?.number;
-            if (!pr) {
-              core.setFailed('No pull_request in context');
-              return;
-            }
+            if (!pr) { core.setFailed('No pull_request in context'); return; }
             const body = [
-              "### ✅ Metadata validated & tables deployed to **staging**",
+              "### ✅ QC/QA passed & deployed to **staging**",
               `- Workflow: ${process.env.GITHUB_WORKFLOW}`,
               `- Target: \`${process.env.TARGET_HOST}\` / \`${process.env.TARGET_DB}\``,
               "",
-              "Artifacts: **generated-sql** (lihat tab Artifacts)."
+              "Guards: type scan, ANSI/QUOTED, SQL parse-only, preflight (DNS/TCP/SELECT 1)."
             ].join("\n");
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr,
-              body
-            });
-
-
+            await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: pr, body });
