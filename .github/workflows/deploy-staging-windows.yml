@@ -5,6 +5,7 @@ on:
 
 jobs:
   deploy_staging:
+    if: ${{ runner.os == 'Windows' }} 
     runs-on: [self-hosted, Windows]
     environment: staging
 

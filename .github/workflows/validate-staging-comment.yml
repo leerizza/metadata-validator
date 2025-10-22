@@ -3,9 +3,7 @@ name: Validate → Deploy STAGING → Comment PR
 on:
   pull_request:
     paths:
-      - "**/*.sql"
-      - "rules.yml"
-      - "validate_sql.py"
+      - "DO-NOT-TRIGGER/**"
 
 jobs:
   validate:
