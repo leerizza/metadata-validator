@@ -4,26 +4,53 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "deploy/**/*.sql"
+      - "tables/**/*.yml"
+      - "tables/**/*.yaml"
+      - "scripts/metadata_validate_and_render.py"
+      - "rules.yml"
       - ".github/workflows/deploy-prod-windows.yml"
   workflow_dispatch: {}
 
-concurrency:
-  group: deploy-prod
-  cancel-in-progress: false
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
 
 defaults:
   run:
     shell: cmd
 
 jobs:
-  deploy:
+  validate_and_deploy_prod:
     runs-on: [self-hosted, Windows]
     environment: production
+
     steps:
       - uses: actions/checkout@v4
 
-      # ambil path sqlcmd dari Actions Variable
+      # Python lokal + venv (tanpa admin)
+      - name: Resolve Python path
+        run: |
+          where python || (echo ❌ Python not found in PATH & exit /b 1)
+          set "PY="
+          for /f "delims=" %%i in ('where python') do (
+            echo %%i | findstr /i "\\WindowsApps\\" >nul && (rem skip) || (
+              set "PY=%%i"
+              goto :found
+            )
+          )
+          :found
+          if "%PY%"=="" (echo ❌ No real python.exe found & exit /b 1)
+          echo PYTHON_EXE=%PY%>>%GITHUB_ENV%
+
+      - name: Create venv & install deps
+        run: |
+          "%PYTHON_EXE%" -m venv .venv
+          set "VENV_PY=%CD%\.venv\Scripts\python.exe"
+          echo VENV_PY=%VENV_PY%>>%GITHUB_ENV%
+          "%VENV_PY%" -m pip install --upgrade pip
+          "%VENV_PY%" -m pip install -r requirements.txt
+
       - name: Use sqlcmd path from repo variable
         run: |
           echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
@@ -31,66 +58,76 @@ jobs:
             echo sqlcmd.exe not found at: ${{ vars.SQLCMD_EXE }}
             exit /b 1
           )
-          echo Using sqlcmd: %SQLCMD_EXE%
 
-      - name: Tool check (sqlcmd)
+      # === Generate SQL dari metadata + RULES (ENV=production) ===
+      - name: Generate SQL (production rules)
+        env:
+          ENVIRONMENT: production
+        run: |
+          "%VENV_PY%" scripts/metadata_validate_and_render.py tables deploy
+
+      # === Preflight PROD ===
+      - name: Echo target
+        env:
+          H: ${{ secrets.PROD_DB_HOST }}   # dwdb
+          P: ${{ secrets.PROD_DB_PORT }}   # 1433
+          D: ${{ secrets.PROD_DB_NAME }}   # DQ_PROD
+        run: |
+          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          if "%H%"=="" ( echo ❌ PROD_DB_HOST empty & exit /b 1 )
+          echo Using sqlcmd: %SQLCMD_EXE%
+          echo Target: %H%,%PORT% / DB=%D%
+
+      - name: DNS resolve
+        env: { H: ${{ secrets.PROD_DB_HOST }} }
+        run: nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
+
+      - name: TCP port check
+        env: { H: ${{ secrets.PROD_DB_HOST }}, P: ${{ secrets.PROD_DB_PORT }} }
         run: >
           powershell -NoProfile -ExecutionPolicy Bypass -Command
-          "$ErrorActionPreference='Stop'; & $env:SQLCMD_EXE -? | Out-Null; Write-Host 'sqlcmd OK'"
+          "$p='%P%'; if([string]::IsNullOrWhiteSpace($p)){$p='1433'}
+           if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]$p) -InformationLevel Quiet)){ exit 1 }"
 
-      # ====== DEPLOY TANPA -Command (anti 'throw was unexpected') ======
-      - name: Deploy to PROD (deploy\*.sql sorted)
+      - name: Test sqlcmd login (SELECT 1)
         env:
-          H: ${{ secrets.DB_HOST }}
-          P: ${{ secrets.DB_PORT }}
-          D: ${{ secrets.DB_NAME }}
-          U: ${{ secrets.DB_USER }}
-          W: ${{ secrets.DB_PASSWORD }}
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
-          >deploy-summary.md (
-            echo ## PROD Deploy
-            echo **Target:** %H%/%D%
-            echo **Executed files:**
-          )
+          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
+          if errorlevel 1 exit /b 1
 
-          set "PORT=%P%"
-          if "%PORT%"=="" set "PORT=1433"
+      # Guard tipe terlarang
+      - name: Block disallowed types in deploy SQL (no MAX, no legacy LOB)
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse -ErrorAction SilentlyContinue
+          if (-not $files){ Write-Host 'No SQL files under deploy/.'; exit 0 }
+          $bad    = Select-String -Path $files.FullName -Pattern '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)'
+          $legacy = Select-String -Path $files.FullName -Pattern '\b(?:text|ntext|image)\b'
+          if ($bad -or $legacy){ Write-Host 'Disallowed types found.'; exit 1 }
 
+      # === DEPLOY PROD ===
+      - name: Deploy to PROD (dwdb / DQ_PROD)
+        env:
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
+        run: |
+          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
           if exist deploy\*.sql (
-            for %%F in (deploy\*.sql) do (
-              echo - %%~nxF>>deploy-summary.md
+            for /f "delims=" %%F in ('dir /b /o:n deploy\*.sql') do (
               echo Executing %%~nxF ...
-              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F"
-              if errorlevel 1 (
-                echo FAILED on %%~nxF
-                exit /b 1
-              )
+              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%F"
+              if errorlevel 1 ( echo ❌ FAILED on %%~nxF & exit /b 1 )
             )
           ) else (
-            echo _No SQL files in deploy/._>>deploy-summary.md
+            echo _No SQL files in deploy/._
           )
-
-      # ====== Tambahan ringkasan objek terbaru (tulis ps1 sementara) ======
-      - name: Append recent objects (last 60m) to summary
-        env:
-          H: ${{ secrets.DB_HOST }}
-          P: ${{ secrets.DB_PORT }}
-          D: ${{ secrets.DB_NAME }}
-          U: ${{ secrets.DB_USER }}
-          W: ${{ secrets.DB_PASSWORD }}
-        run: |
-          set "PORT=%P%"
-          if "%PORT%"=="" set "PORT=1433"
-
-          set "SQL=SET NOCOUNT ON; SELECT TOP (50) s.name + '.' + t.name AS table_name, t.create_date, t.modify_date FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE t.create_date >= DATEADD(MINUTE, -60, SYSUTCDATETIME()) OR t.modify_date >= DATEADD(MINUTE, -60, SYSUTCDATETIME()) ORDER BY t.modify_date DESC, t.create_date DESC;"
-
-          "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -h -1 -W -s " | " -Q "%SQL%" >> deploy-summary.md
-          if errorlevel 1 (
-            echo _(No recent changes or query failed)_>>deploy-summary.md
-          )
-
-      - name: Upload deploy summary
-        uses: actions/upload-artifact@v4
-        with:
-          name: prod-deploy-summary
-          path: deploy-summary.md

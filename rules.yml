@@ -17,3 +17,11 @@ datatype:
 files:
   include_globs: ["**/*.sql"]
   exclude_globs: ["migrations/**", "archive/**"]
+
+max_columns: 200
+forbidden_types:
+  - "(max)"          # block semua var*(max)
+  - "text"
+  - "ntext"
+  - "image"t
+min_indexes: 0 
