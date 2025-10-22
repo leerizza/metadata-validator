@@ -3,16 +3,11 @@ name: Deploy to STAGING (Windows Self-Hosted)
 on:
   workflow_dispatch:
 
-concurrency:
-  group: deploy-staging
-  cancel-in-progress: true
-
 jobs:
   deploy_staging:
-    if: ${{ runner.os == 'Windows' }}
+    if: ${{ runner.os == 'Windows' }} 
     runs-on: [self-hosted, Windows]
     environment: staging
-    timeout-minutes: 25
 
     defaults:
       run:
@@ -22,48 +17,16 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # --- LOGS: siapkan folder untuk semua log ------------------------------
-      - name: Prepare logs folder
-        shell: cmd
+      # --- SQLCMD PATH -------------------------------------------------------
+      - name: Ensure sqlcmd path
         run: |
-          if not exist deploy_logs mkdir deploy_logs
-          echo LOGDIR=%CD%\deploy_logs>>%GITHUB_ENV%
-
-      # --- SQLCMD PATH (auto-detect) -----------------------------------------
-      - name: Resolve sqlcmd.exe
-        shell: powershell
-        env:
-          VAR_SQLCMD: ${{ vars.SQLCMD_EXE }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          function Exists($p){ if([string]::IsNullOrWhiteSpace($p)){return $false}; Test-Path $p }
-          $candidates = @()
-
-          if ($env:VAR_SQLCMD) { $candidates += $env:VAR_SQLCMD }
-
-          try {
-            $found = & where.exe sqlcmd 2>$null
-            if ($LASTEXITCODE -eq 0) {
-              $candidates += ($found -split "`r?`n" | Where-Object { $_ -and (Test-Path $_) })
-            }
-          } catch {}
-
-          $candidates += @(
-            "C:\Program Files\SqlCmd\sqlcmd.exe",
-            "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe",
-            "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe",
-            "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe",
-            "C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe"
+          set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
+          if not exist "%SQLCMD_EXE%" (
+            echo ❌ sqlcmd not found in expected path.
+            exit /b 1
           )
-
-          foreach($p in $candidates){
-            if (Exists $p) {
-              "SQLCMD_EXE=$p" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding Ascii
-              Write-Host "Using sqlcmd: $p"
-              exit 0
-            }
-          }
-          Write-Error "sqlcmd.exe not found. Set repo variable SQLCMD_EXE or install SQLCMD tools."
+          echo ✅ Found sqlcmd at "%SQLCMD_EXE%"
+        shell: cmd
 
       # --- PRE-FLIGHT CHECKS -------------------------------------------------
       - name: Echo target
@@ -75,30 +38,29 @@ jobs:
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
           if "%H%"=="" (
-            echo Secret STG_DB_HOST is empty
+            echo ❌ Secret STG_DB_HOST kosong
             exit /b 1
           )
-          echo Using sqlcmd: %SQLCMD_EXE%
           echo Target: %H%,%PORT% / DB=%D%
 
       - name: DNS resolve
         env:
           H: ${{ secrets.STG_DB_HOST }}
-        run: nslookup %H% || (echo DNS FAILED & exit /b 1)
+        run: |
+          nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
 
       - name: TCP port check
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
-        shell: powershell
-        run: |
-          $ErrorActionPreference='Stop'
-          $port = if ($env:P) { $env:P } else { "1433" }
-          if (-not (Test-NetConnection -ComputerName $env:H -Port ([int]$port) -InformationLevel Quiet)) {
-            Write-Error "TCP connection to $($env:H):$port failed"
-          } else {
-            Write-Host "TCP OK to $($env:H):$port"
-          }
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           $p = '%P%'; if([string]::IsNullOrWhiteSpace($p)){$p='1433'};
+           if(-not (Test-NetConnection -ComputerName '%H%' -Port ([int]$p) -InformationLevel Quiet)){
+             Write-Host '❌ TCP connection failed'; exit 1
+           }
+           Write-Host '✅ TCP OK'"
 
       - name: Test sqlcmd login (SELECT 1)
         env:
@@ -110,107 +72,29 @@ jobs:
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-          "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
+          "C:\Program Files\SqlCmd\sqlcmd.exe" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
           if errorlevel 1 exit /b 1
 
       # --- SQL TYPE VALIDATION GUARD -----------------------------------------
       - name: Block disallowed types in deploy SQL (no MAX, no legacy LOB)
-        shell: powershell
-        run: |
-          $ErrorActionPreference='Stop'
-          $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse -ErrorAction SilentlyContinue
-          if (-not $files) { Write-Host "No SQL files under deploy/."; exit 0 }
-          $patMax    = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)'
-          $patLegacy = '\b(?:text|ntext|image)\b'
-          $bad1 = Select-String -Path $files.FullName -Pattern $patMax
-          $bad2 = Select-String -Path $files.FullName -Pattern $patLegacy
-          if ( ($bad1 | Measure-Object).Count -gt 0 -or ($bad2 | Measure-Object).Count -gt 0 ) {
-            if ($bad1) { ($bad1.Path | Sort-Object -Unique) | ForEach-Object { Write-Host " - $_" } }
-            if ($bad2) { ($bad2.Path | Sort-Object -Unique) | ForEach-Object { Write-Host " - $_" } }
-            exit 1
-          }
-          Write-Host "Type guard passed."
-
-      # --- SQL PARSE-ONLY (syntax check tanpa eksekusi) ----------------------
-      - name: SQL parse-only (syntax check, no execution)
-        shell: powershell
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-          D: ${{ secrets.STG_DB_NAME }}
-          U: ${{ secrets.STG_DB_USER }}
-          W: ${{ secrets.STG_DB_PASSWORD }}
-          LOGDIR: ${{ env.LOGDIR }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $port = if ($env:P) { $env:P } else { "1433" }
-          if (-not (Test-Path $env:LOGDIR)) { New-Item -ItemType Directory -Path $env:LOGDIR | Out-Null }
-
-          $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -ErrorAction SilentlyContinue
-          if (-not $files) {
-            "No SQL to parse." | Tee-Object -FilePath (Join-Path $env:LOGDIR "parseonly.log") -Append
-            exit 0
-          }
-
-          $master = Join-Path $env:LOGDIR "parseonly.log"
-          "== PARSE ONLY via wrapper (-i) ==" | Set-Content -Path $master -Encoding UTF8
-          "Server=$($env:H), Port=$port, DB=$($env:D)" | Add-Content -Path $master -Encoding UTF8
-          "sqlcmd=$env:SQLCMD_EXE" | Add-Content -Path $master -Encoding UTF8
-          "" | Add-Content -Path $master -Encoding UTF8
-
-          foreach ($f in $files) {
-            $src  = $f.FullName
-            $wrap = Join-Path $env:LOGDIR ("__parse_" + $f.BaseName + ".sql")
-            $out  = Join-Path $env:LOGDIR ("parse_" + $f.BaseName + ".log")
-
-            # Build wrapper: NOEXEC + :r (must be executed with -i so :r is parsed)
-            @(
-              ":ON ERROR EXIT",
-              "SET NOEXEC ON",
-              ":r `"$src`"",
-              "SET NOEXEC OFF"
-            ) | Set-Content -Path $wrap -Encoding UTF8
-
-            # Echo what we are about to run (debug)
-            "WRAPPER: $wrap"        | Tee-Object -FilePath $master -Append
-            "SOURCE : $src"         | Tee-Object -FilePath $master -Append
-            "----- wrapper content begin -----" | Tee-Object -FilePath $master -Append
-            Get-Content -Path $wrap | Tee-Object -FilePath $master -Append
-            "----- wrapper content end   -----" | Tee-Object -FilePath $master -Append
-
-            # Run wrapper with -i (NOT -Q), so :r is honored. -b to fail on error, -C trust cert, -f 65001 (UTF-8)
-            & "$env:SQLCMD_EXE" `
-              -S "$($env:H),$port" -d "$($env:D)" -U "$($env:U)" -P "$env:W" `
-              -b -C -i "$wrap" -f 65001 -o "$out"
-
-            if ($LASTEXITCODE -ne 0) {
-              "FAILED -> $src (see $out)" | Tee-Object -FilePath $master -Append
-              Get-Content -Path $out -Tail 100 | Tee-Object -FilePath $master -Append
-              throw ("Parse failed: {0}" -f $f.Name)
-            } else {
-              "OK -> $src" | Tee-Object -FilePath $master -Append
-            }
-            "" | Add-Content -Path $master -Encoding UTF8
-          }
-
-
-
-      - name: Show parse-only tail on failure
-        if: ${{ failure() }}
-        shell: powershell
-        env:
-          LOGDIR: ${{ env.LOGDIR }}
-        run: |
-          $master = Join-Path $env:LOGDIR "parseonly.log"
-          if (Test-Path $master) {
-            Write-Host "----- tail parseonly.log -----"
-            Get-Content -Path $master -Tail 200 | Write-Host
-            Write-Host "--------------------------------"
-          } else {
-            Write-Host "parseonly.log not found."
-          }
-  
-
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           $bad = @();
+           $re = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)';
+           $legacy = '\b(?:text|ntext|image)\b';
+           if(Test-Path 'deploy'){
+             Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse | ForEach-Object {
+               $t = (Get-Content $_.FullName -Raw).ToLower();
+               if($t -match $re -or $t -match $legacy){ $bad += $_.FullName }
+             }
+           }
+           if($bad.Count -gt 0){
+             Write-Host '❌ Disallowed types ditemukan di file berikut:';
+             $bad | ForEach-Object { Write-Host (' - ' + $_) };
+             exit 1
+           }
+           Write-Host '✅ Tidak ada tipe terlarang di deploy/*.sql.'"
 
       # --- DEPLOYMENT --------------------------------------------------------
       - name: Deploy to STAGING (deploy/*.sql sorted)
@@ -220,38 +104,19 @@ jobs:
           D: ${{ secrets.STG_DB_NAME }}
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
-          LOGDIR: ${{ env.LOGDIR }}
         run: |
           setlocal enabledelayedexpansion
+          set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
 
-          if not exist deploy\*.sql (
-            echo No SQL files in deploy\ .
-            exit /b 0
-          )
-
-          echo Running deploy scripts on %H%,%PORT% [DB=%D%] ...
-          if not exist "%LOGDIR%" mkdir "%LOGDIR%"
-
-          for /f "delims=" %%F in ('dir /b /o:n deploy\*.sql') do (
-            set "OUTLOG=%LOGDIR%\%%~nF.out.txt"
-            echo Executing %%F ... > "!OUTLOG!"
-            "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%F" -o "!OUTLOG!"
+          echo Running deploy scripts on %H%,%PORT% [%D%] ...
+          for /f "delims=" %%f in ('dir /b /o:n deploy\*.sql') do (
+            echo Executing %%f ...
+            "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%f"
             if errorlevel 1 (
-              echo FAILED on %%F
+              echo ❌ FAILED ON %%f
               exit /b 1
             )
           )
-          echo All deploy SQL executed successfully.
-
-      # --- UPLOAD LOGS SELALU (bahkan kalau gagal) ---------------------------
-      - name: Upload deploy logs
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: staging-deploy-logs
-          path: |
-            deploy_logs/**
-            deploy/*.sql
-          if-no-files-found: warn
+          echo ✅ All deploy SQL executed successfully.
