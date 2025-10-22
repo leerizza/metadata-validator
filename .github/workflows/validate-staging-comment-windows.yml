@@ -22,23 +22,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+            # 1) Deteksi Python yang sudah terpasang di runner
+      - name: Find existing Python on PATH
+        run: |
+          where python || (echo ❌ Python not found in PATH & exit /b 1)
+          for /f "delims=" %%i in ('where python') do (
+            echo BASE_PY=%%i>>%GITHUB_ENV%
+            goto :found
+          )
+          :found
+          "%BASE_PY%" --version
 
-      - name: Install deps
-        run: pip install -r requirements.txt
+      # 2) Buat virtualenv lokal di workspace (tidak perlu admin)
+      - name: Create venv and install deps (user scope)
+        run: |
+          "%BASE_PY%" -m venv .venv
+          echo PYTHON_EXE=%CD%\.venv\Scripts\python.exe>>%GITHUB_ENV%
+          "%PYTHON_EXE%" -m pip install --upgrade pip
+          "%PYTHON_EXE%" -m pip install -r requirements.txt
 
-      # (opsional) validator SQL lama
+      # 3) (opsional) jalankan validator lama kalau masih dipakai
       - name: Run legacy validator (optional)
         continue-on-error: true
-        run: >
-          python validate_sql.py --junit report.xml
+        run: |
+          "%PYTHON_EXE%" validate_sql.py --junit report.xml
 
-      # ==== VALIDATE METADATA & RENDER SQL KE deploy/ ====
+      # 4) Validasi metadata & render SQL ke folder deploy/
       - name: Generate CREATE TABLE from metadata (PoC)
-        run: >
-          python scripts/metadata_validate_and_render.py tables deploy
+        run: |
+          "%PYTHON_EXE%" scripts/metadata_validate_and_render.py tables deploy
 
       # Simpan hasil render untuk job berikutnya
       - name: Upload generated SQL
