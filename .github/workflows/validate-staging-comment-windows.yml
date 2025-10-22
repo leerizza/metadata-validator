@@ -23,34 +23,44 @@ jobs:
       - uses: actions/checkout@v4
 
             # 1) Deteksi Python yang sudah terpasang di runner
-      - name: Find existing Python on PATH
+      - name: Resolve Python path (skip WindowsApps alias)
         run: |
           where python || (echo ❌ Python not found in PATH & exit /b 1)
+          set "PY="
           for /f "delims=" %%i in ('where python') do (
-            echo BASE_PY=%%i>>%GITHUB_ENV%
-            goto :found
+            rem skip alias dari Microsoft Store
+            echo %%i | findstr /i "\\WindowsApps\\" >nul && (rem skip) || (
+              set "PY=%%i"
+              goto :found
+            )
           )
           :found
-          "%BASE_PY%" --version
+          if "%PY%"=="" (echo ❌ No real python.exe found & exit /b 1)
+          echo Using Python: %PY%
+          echo PYTHON_EXE=%PY%>>%GITHUB_ENV%
+
 
       # 2) Buat virtualenv lokal di workspace (tidak perlu admin)
-      - name: Create venv and install deps (user scope)
+      - name: Create venv and install deps
         run: |
-          "%BASE_PY%" -m venv .venv
-          echo PYTHON_EXE=%CD%\.venv\Scripts\python.exe>>%GITHUB_ENV%
-          "%PYTHON_EXE%" -m pip install --upgrade pip
-          "%PYTHON_EXE%" -m pip install -r requirements.txt
+          "%PYTHON_EXE%" --version
+          "%PYTHON_EXE%" -m venv .venv
+          set "VENV_PY=%CD%\.venv\Scripts\python.exe"
+          echo VENV_PY=%VENV_PY%>>%GITHUB_ENV%
+          "%VENV_PY%" -m pip install --upgrade pip
+          "%VENV_PY%" -m pip install -r requirements.txt
+
 
       # 3) (opsional) jalankan validator lama kalau masih dipakai
       - name: Run legacy validator (optional)
         continue-on-error: true
         run: |
-          "%PYTHON_EXE%" validate_sql.py --junit report.xml
+          "%VENV_PY%" validate_sql.py --junit report.xml
 
-      # 4) Validasi metadata & render SQL ke folder deploy/
       - name: Generate CREATE TABLE from metadata (PoC)
         run: |
-          "%PYTHON_EXE%" scripts/metadata_validate_and_render.py tables deploy
+          "%VENV_PY%" scripts/metadata_validate_and_render.py tables deploy
+
 
       # Simpan hasil render untuk job berikutnya
       - name: Upload generated SQL
