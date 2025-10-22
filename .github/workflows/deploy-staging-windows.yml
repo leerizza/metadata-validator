@@ -144,16 +144,26 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $port = if ($env:P) { $env:P } else { "1433" }
-          $log  = Join-Path $env:LOGDIR "parseonly.log"
           $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -ErrorAction SilentlyContinue
-          if (-not $files) { "No SQL to parse." | Tee-Object -FilePath $log -Append; exit 0 }
+          if (-not $files) { Write-Host "No SQL to parse."; exit 0 }
 
           foreach ($f in $files) {
-            "PARSEONLY -> $($f.FullName)" | Tee-Object -FilePath $log -Append
-            & "$env:SQLCMD_EXE" -S "$($env:H),$port" -d "$($env:D)" -U "$($env:U)" -P "$env:W" -b -C -Q "SET PARSEONLY ON; :r `"$($f.FullName)`"; SET PARSEONLY OFF;" 2>&1 |
-              Tee-Object -FilePath $log -Append | Out-Host
+            $wrap = Join-Path $env:LOGDIR ("__parse_" + $f.BaseName + ".sql")
+            @(
+              "SET PARSEONLY ON",
+              ":r `"$($f.FullName)`"",
+              "SET PARSEONLY OFF"
+            ) | Set-Content -Path $wrap -Encoding ASCII
+
+            Write-Host ("PARSEONLY -> {0}" -f $f.FullName)
+            & "$env:SQLCMD_EXE" `
+              -S "$($env:H),$port" -d "$($env:D)" -U "$($env:U)" -P "$env:W" `
+              -b -C -i "$wrap" 2>&1 |
+              Tee-Object -FilePath (Join-Path $env:LOGDIR "parseonly.log") -Append | Out-Host
+
             if ($LASTEXITCODE -ne 0) { throw ("Parse failed: {0}" -f $f.Name) }
           }
+
 
       # --- DEPLOYMENT --------------------------------------------------------
       - name: Deploy to STAGING (deploy/*.sql sorted)
