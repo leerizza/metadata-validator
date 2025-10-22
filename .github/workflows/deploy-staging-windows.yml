@@ -144,25 +144,66 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $port = if ($env:P) { $env:P } else { "1433" }
+
+          # kumpulkan file
           $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -ErrorAction SilentlyContinue
-          if (-not $files) { Write-Host "No SQL to parse."; exit 0 }
+          if (-not $files) {
+            "No SQL to parse." | Tee-Object -FilePath (Join-Path $env:LOGDIR "parseonly.log") -Append
+            exit 0
+          }
+
+          $master = Join-Path $env:LOGDIR "parseonly.log"
+          "== PARSE-ONLY / NOEXEC ==" | Set-Content -Path $master -Encoding ASCII
+          "Server=$($env:H), Port=$port, DB=$($env:D)" | Add-Content -Path $master -Encoding ASCII
+          "sqlcmd=$env:SQLCMD_EXE" | Add-Content -Path $master -Encoding ASCII
+          "" | Add-Content -Path $master -Encoding ASCII
 
           foreach ($f in $files) {
+            $filePath = $f.FullName
             $wrap = Join-Path $env:LOGDIR ("__parse_" + $f.BaseName + ".sql")
+            $out  = Join-Path $env:LOGDIR ("parse_" + $f.BaseName + ".log")
+
+            # wrapper: compile-only (NOEXEC). :ON ERROR EXIT agar sqlcmd return code > 0 saat ada error
             @(
-              "SET PARSEONLY ON",
-              ":r `"$($f.FullName)`"",
-              "SET PARSEONLY OFF"
+              ":ON ERROR EXIT",
+              "SET NOEXEC ON",
+              ":r `"$filePath`"",
+              "SET NOEXEC OFF"
             ) | Set-Content -Path $wrap -Encoding ASCII
 
-            Write-Host ("PARSEONLY -> {0}" -f $f.FullName)
+            "PARSEONLY -> $filePath" | Tee-Object -FilePath $master -Append
+
+            # -b : fail on error, -C : trust cert, -f 65001 : input file UTF-8
             & "$env:SQLCMD_EXE" `
               -S "$($env:H),$port" -d "$($env:D)" -U "$($env:U)" -P "$env:W" `
-              -b -C -i "$wrap" 2>&1 |
-              Tee-Object -FilePath (Join-Path $env:LOGDIR "parseonly.log") -Append | Out-Host
+              -b -C -i "$wrap" -f 65001 -o "$out"
 
-            if ($LASTEXITCODE -ne 0) { throw ("Parse failed: {0}" -f $f.Name) }
+            if ($LASTEXITCODE -ne 0) {
+              "FAILED -> $filePath (see $out)" | Tee-Object -FilePath $master -Append
+              Get-Content -Path $out -Tail 100 | Tee-Object -FilePath $master -Append
+              throw ("Parse failed: {0}" -f $f.Name)
+            } else {
+              "OK -> $filePath" | Tee-Object -FilePath $master -Append
+            }
+            "" | Add-Content -Path $master -Encoding ASCII
           }
+
+
+      - name: Show parse-only tail on failure
+        if: ${{ failure() }}
+        shell: powershell
+        env:
+          LOGDIR: ${{ env.LOGDIR }}
+        run: |
+          $master = Join-Path $env:LOGDIR "parseonly.log"
+          if (Test-Path $master) {
+            Write-Host "----- tail parseonly.log -----"
+            Get-Content -Path $master -Tail 200 | Write-Host
+            Write-Host "--------------------------------"
+          } else {
+            Write-Host "parseonly.log not found."
+          }
+  
 
 
       # --- DEPLOYMENT --------------------------------------------------------
