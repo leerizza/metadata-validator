@@ -54,12 +54,13 @@ jobs:
       # 3) (opsional) jalankan validator lama kalau masih dipakai
       - name: Run legacy validator (optional)
         continue-on-error: true
+        env:
+          PYTHONUTF8: "1"            # aktifkan UTF-8 mode
+          PYTHONIOENCODING: "UTF-8"  # paksa stdout/stderr UTF-8
         run: |
-          "%VENV_PY%" validate_sql.py --junit report.xml
+          chcp 65001 >NUL            rem set console code page ke UTF-8
+          "%VENV_PY%" -X utf8 validate_sql.py --junit report.xml
 
-      - name: Generate CREATE TABLE from metadata (PoC)
-        run: |
-          "%VENV_PY%" scripts/metadata_validate_and_render.py tables deploy
 
 
       # Simpan hasil render untuk job berikutnya

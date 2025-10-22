@@ -124,7 +124,7 @@ def main():
             all_errs.append((f, file_errs))
 
     if all_errs:
-        print("❌ Metadata validation FAILED\n")
+        print("Metadata validation FAILED\n")
         for f, errs in all_errs:
             print(f"File: {f}")
             for e in errs:
@@ -134,7 +134,7 @@ def main():
             to_junit(all_errs, args.junit)
         sys.exit(1)
     else:
-        print("✅ Metadata validation PASSED")
+        print("Metadata validation PASSED")
         if args.junit:
             to_junit([], args.junit)
         sys.exit(0)
