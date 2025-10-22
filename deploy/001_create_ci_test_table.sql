@@ -1,0 +1,10 @@
+IF OBJECT_ID('dbo.ci_test', 'U') IS NOT NULL
+  DROP TABLE dbo.ci_test;
+GO
+
+CREATE TABLE dbo.ci_test (
+  id INT NOT NULL PRIMARY KEY,
+  name VARCHAR(100) NULL,
+  created_at DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME()
+);
+GO
