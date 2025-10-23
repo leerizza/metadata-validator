@@ -77,7 +77,10 @@ jobs:
           PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
         run: |
           nslookup %PROD_DB_HOST% || (echo DNS FAIL & exit /b 1)
-          powershell -Command "if(!(Test-NetConnection -ComputerName '%PROD_DB_HOST%' -Port ([int]('%PROD_DB_PORT%' -ne '' ? '%PROD_DB_PORT%' : '1433')) -InformationLevel Quiet)){exit 1}"
+          set "PORT=%P%"
+          if "%PORT%"=="" set "PORT=1433"
+          echo Checking TCP connection to %H%:%PORT% ...
+          powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]'%PORT%') -InformationLevel Quiet)){exit 1}"
 
       - name: Test sqlcmd login (SELECT 1)
         env:
