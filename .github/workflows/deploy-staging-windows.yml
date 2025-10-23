@@ -1,122 +1,122 @@
-name: Deploy to STAGING (Windows Self-Hosted)
+name: Deploy to PRODUCTION
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - "deploy/**/*.sql"
+      - ".github/workflows/**"
+      - "scripts/**"
+      - "rules.yml"
+      - "validate_sql.py"
+
+concurrency:
+  group: prod-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: cmd
 
 jobs:
-  deploy_staging:
-    if: ${{ runner.os == 'Windows' }} 
+  deploy_prod:
     runs-on: [self-hosted, Windows]
-    environment: staging
-
-    defaults:
-      run:
-        shell: cmd
-
+    environment: production   # ← akan menunggu APPROVAL dari required reviewers
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # --- SQLCMD PATH -------------------------------------------------------
-      - name: Ensure sqlcmd path
+      - name: Prepare logs folder
+        shell: powershell
         run: |
-          set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
-          if not exist "%SQLCMD_EXE%" (
-            echo ❌ sqlcmd not found in expected path.
-            exit /b 1
-          )
-          echo ✅ Found sqlcmd at "%SQLCMD_EXE%"
-        shell: cmd
+          $root = Join-Path $env:GITHUB_WORKSPACE 'deploy_logs_prod'
+          if (!(Test-Path $root)) { New-Item -ItemType Directory -Path $root -Force | Out-Null }
+          "LOGDIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
-      # --- PRE-FLIGHT CHECKS -------------------------------------------------
+      - name: Ensure sqlcmd path (CMD)
+        run: |
+            set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
+            if not exist "%SQLCMD_EXE%" (
+            echo sqlcmd not found at %SQLCMD_EXE%
+            exit /b 1
+            )
+            echo Using sqlcmd: %SQLCMD_EXE%
+            echo SQLCMD_EXE=%SQLCMD_EXE%>>"%GITHUB_ENV%"
+
+
       - name: Echo target
         env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-          D: ${{ secrets.STG_DB_NAME }}
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-          if "%H%"=="" (
-            echo ❌ Secret STG_DB_HOST kosong
-            exit /b 1
-          )
           echo Target: %H%,%PORT% / DB=%D%
 
+       # Preflight — DNS
       - name: DNS resolve
         env:
           H: ${{ secrets.STG_DB_HOST }}
-        run: |
-          nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
+        run: nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
 
+      # Preflight — TCP
       - name: TCP port check
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
-        run: >
-          powershell -NoProfile -ExecutionPolicy Bypass -Command
-          "$ErrorActionPreference='Stop';
-           $p = '%P%'; if([string]::IsNullOrWhiteSpace($p)){$p='1433'};
-           if(-not (Test-NetConnection -ComputerName '%H%' -Port ([int]$p) -InformationLevel Quiet)){
-             Write-Host '❌ TCP connection failed'; exit 1
-           }
-           Write-Host '✅ TCP OK'"
+        run: |
+          set "PORT=%P%"
+          if "%PORT%"=="" set "PORT=1433"
+          echo Checking TCP connection to %H%:%PORT% ...
+          powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]'%PORT%') -InformationLevel Quiet)){exit 1}"
 
       - name: Test sqlcmd login (SELECT 1)
         env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-          D: ${{ secrets.STG_DB_NAME }}
-          U: ${{ secrets.STG_DB_USER }}
-          W: ${{ secrets.STG_DB_PASSWORD }}
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-          "C:\Program Files\SqlCmd\sqlcmd.exe" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
-          if errorlevel 1 exit /b 1
+          "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
 
-      # --- SQL TYPE VALIDATION GUARD -----------------------------------------
-      - name: Block disallowed types in deploy SQL (no MAX, no legacy LOB)
-        run: >
-          powershell -NoProfile -ExecutionPolicy Bypass -Command
-          "$ErrorActionPreference='Stop';
-           $bad = @();
-           $re = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)';
-           $legacy = '\b(?:text|ntext|image)\b';
-           if(Test-Path 'deploy'){
-             Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse | ForEach-Object {
-               $t = (Get-Content $_.FullName -Raw).ToLower();
-               if($t -match $re -or $t -match $legacy){ $bad += $_.FullName }
-             }
-           }
-           if($bad.Count -gt 0){
-             Write-Host '❌ Disallowed types ditemukan di file berikut:';
-             $bad | ForEach-Object { Write-Host (' - ' + $_) };
-             exit 1
-           }
-           Write-Host '✅ Tidak ada tipe terlarang di deploy/*.sql.'"
-
-      # --- DEPLOYMENT --------------------------------------------------------
-      - name: Deploy to STAGING (deploy/*.sql sorted)
+      - name: Deploy to PRODUCTION (deploy/*.sql sorted)
         env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-          D: ${{ secrets.STG_DB_NAME }}
-          U: ${{ secrets.STG_DB_USER }}
-          W: ${{ secrets.STG_DB_PASSWORD }}
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
+          LOGDIR: ${{ env.LOGDIR }}
         run: |
           setlocal enabledelayedexpansion
-          set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
+          if "%LOGDIR%"=="" set "LOGDIR=%CD%\deploy_logs_prod"
+          if not exist "%LOGDIR%" mkdir "%LOGDIR%"
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-
-          echo Running deploy scripts on %H%,%PORT% [%D%] ...
-          for /f "delims=" %%f in ('dir /b /o:n deploy\*.sql') do (
-            echo Executing %%f ...
-            "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%f"
+          if not exist deploy\*.sql (
+            echo No SQL files in deploy\ .
+            exit /b 0
+          )
+          for /f "delims=" %%F in ('dir /b /o:n deploy\*.sql') do (
+            set "OUTLOG=%LOGDIR%\%%~nF.out.txt"
+            echo Executing %%F ... > "!OUTLOG!"
+            "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%F" -o "!OUTLOG!"
             if errorlevel 1 (
-              echo ❌ FAILED ON %%f
+              echo FAILED on %%F
               exit /b 1
             )
           )
-          echo ✅ All deploy SQL executed successfully.
+          echo ✅ PRODUCTION deploy done.
+
+      - name: Upload deploy logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-deploy-logs
+          path: |
+            deploy_logs_prod/**
+            deploy/*.sql
+          if-no-files-found: warn
