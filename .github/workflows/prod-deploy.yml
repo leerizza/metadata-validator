@@ -34,14 +34,11 @@ jobs:
 
       - name: Ensure sqlcmd path (CMD)
         run: |
-            set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
-            if not exist "%SQLCMD_EXE%" (
-            echo sqlcmd not found at %SQLCMD_EXE%
+          echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
+          if not exist "%SQLCMD_EXE%" (
+            echo ❌ sqlcmd not found at %SQLCMD_EXE%
             exit /b 1
-            )
-            echo Using sqlcmd: %SQLCMD_EXE%
-            echo SQLCMD_EXE=%SQLCMD_EXE%>>"%GITHUB_ENV%"
-
+          )
 
       - name: Echo target
         env:
