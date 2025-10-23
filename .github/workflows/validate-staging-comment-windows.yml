@@ -143,6 +143,21 @@ jobs:
             exit /b 1
           )
 
+
+      - name: Prepare logs folder
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # lokasi default di bawah workspace
+          $root = Join-Path $env:GITHUB_WORKSPACE 'deploy_logs'
+          if (!(Test-Path -LiteralPath $root)) {
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+          }
+          # export ke env untuk step-step berikutnya
+          "LOGDIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          Write-Host "LOGDIR=$root"
+
+
       # ===== Preflight STAGING =====
       - name: Echo target
         env:
@@ -217,80 +232,99 @@ jobs:
           LOGDIR: ${{ env.LOGDIR }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $port = if ($env:P) { $env:P } else { "1433" }
-          if (-not (Test-Path $env:LOGDIR)) { New-Item -ItemType Directory -Path $env:LOGDIR | Out-Null }
+
+          # fallback jika LOGDIR tidak terbaca
+          $logRoot = if ($env:LOGDIR -and $env:LOGDIR.Trim().Length -gt 0) {
+            $env:LOGDIR
+          } else {
+            Join-Path $env:GITHUB_WORKSPACE 'deploy_logs'
+          }
+          if (!(Test-Path -LiteralPath $logRoot)) {
+            New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+          }
+
+          $port   = if ($env:P) { $env:P } else { "1433" }
+          $master = Join-Path $logRoot "parseonly.log"
 
           $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -ErrorAction SilentlyContinue
           if (-not $files) {
-            "No SQL to parse." | Tee-Object -FilePath (Join-Path $env:LOGDIR "parseonly.log") -Append
+            "No SQL to parse." | Tee-Object -FilePath $master -Append
             exit 0
           }
 
-          $master = Join-Path $env:LOGDIR "parseonly.log"
-          "== PARSE ONLY via wrapper (-i) ==" | Set-Content -Path $master -Encoding UTF8
-          "Server=$($env:H), Port=$port, DB=$($env:D)" | Add-Content -Path $master -Encoding UTF8
-          "sqlcmd=$env:SQLCMD_EXE" | Add-Content -Path $master -Encoding UTF8
-          "" | Add-Content -Path $master -Encoding UTF8
+          "== PARSE ONLY via wrapper (-i) ==" | Set-Content -LiteralPath $master -Encoding UTF8
+          "Server=$($env:H), Port=$port, DB=$($env:D)" | Add-Content -LiteralPath $master -Encoding UTF8
+          "sqlcmd=$env:SQLCMD_EXE" | Add-Content -LiteralPath $master -Encoding UTF8
+          "" | Add-Content -LiteralPath $master -Encoding UTF8
 
           foreach ($f in $files) {
             $src  = $f.FullName
-            $wrap = Join-Path $env:LOGDIR ("__parse_" + $f.BaseName + ".sql")
-            $out  = Join-Path $env:LOGDIR ("parse_" + $f.BaseName + ".log")
+            $wrap = Join-Path $logRoot ("__parse_" + $f.BaseName + ".sql")
+            $out  = Join-Path $logRoot ("parse_" + $f.BaseName + ".log")
 
-            # Build wrapper: NOEXEC + :r (must be executed with -i so :r is parsed)
             @(
               ":ON ERROR EXIT",
               "SET NOEXEC ON",
               ":r `"$src`"",
               "SET NOEXEC OFF"
-            ) | Set-Content -Path $wrap -Encoding UTF8
+            ) | Set-Content -LiteralPath $wrap -Encoding UTF8
 
-            # Echo what we are about to run (debug)
-            "WRAPPER: $wrap"        | Tee-Object -FilePath $master -Append
-            "SOURCE : $src"         | Tee-Object -FilePath $master -Append
+            "WRAPPER: $wrap" | Tee-Object -FilePath $master -Append
+            "SOURCE : $src"  | Tee-Object -FilePath $master -Append
             "----- wrapper content begin -----" | Tee-Object -FilePath $master -Append
-            Get-Content -Path $wrap | Tee-Object -FilePath $master -Append
+            Get-Content -LiteralPath $wrap | Tee-Object -FilePath $master -Append
             "----- wrapper content end   -----" | Tee-Object -FilePath $master -Append
 
-            # Run wrapper with -i (NOT -Q), so :r is honored. -b to fail on error, -C trust cert, -f 65001 (UTF-8)
             & "$env:SQLCMD_EXE" `
               -S "$($env:H),$port" -d "$($env:D)" -U "$($env:U)" -P "$env:W" `
               -b -C -i "$wrap" -f 65001 -o "$out"
 
             if ($LASTEXITCODE -ne 0) {
               "FAILED -> $src (see $out)" | Tee-Object -FilePath $master -Append
-              Get-Content -Path $out -Tail 100 | Tee-Object -FilePath $master -Append
+              Get-Content -LiteralPath $out -Tail 100 | Tee-Object -FilePath $master -Append
               throw ("Parse failed: {0}" -f $f.Name)
             } else {
               "OK -> $src" | Tee-Object -FilePath $master -Append
             }
-            "" | Add-Content -Path $master -Encoding UTF8
+            "" | Add-Content -LiteralPath $master -Encoding UTF8
           }
 
 
       # ===== DEPLOY STAGING =====
-      - name: Deploy to STAGING (dwdb-sol / DQ_DEV)
+      - name: Deploy to STAGING (deploy/*.sql sorted)
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
           D: ${{ secrets.STG_DB_NAME }}
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
+          LOGDIR: ${{ env.LOGDIR }}
         run: |
+          setlocal enabledelayedexpansion
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-          if exist deploy\*.sql (
-            for /f "delims=" %%F in ('dir /b /o:n deploy\*.sql') do (
-              echo Executing %%~nxF ...
-              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%F"
-              if errorlevel 1 (
-                echo FAILED on %%~nxF
-                exit /b 1
-              )
-            )
-          ) else (
-            echo _No SQL files in deploy/._
+
+          rem fallback jika LOGDIR kosong
+          if "%LOGDIR%"=="" set "LOGDIR=%CD%\deploy_logs"
+          if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+
+          if not exist deploy\*.sql (
+            echo No SQL files in deploy\ .
+            exit /b 0
           )
+
+          echo Running deploy scripts on %H%,%PORT% [DB=%D%] ...
+          for /f "delims=" %%F in ('dir /b /o:n deploy\*.sql') do (
+            set "OUTLOG=%LOGDIR%\%%~nF.out.txt"
+            echo Executing %%F ... > "!OUTLOG!"
+            "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%F" -o "!OUTLOG!"
+            if errorlevel 1 (
+              echo FAILED on %%F
+              exit /b 1
+            )
+          )
+          echo All deploy SQL executed successfully.
+
 
       # ===== COMMENT PR =====
       - name: Comment on PR (summary)
@@ -312,3 +346,14 @@ jobs:
               "Guards: type scan, ANSI/QUOTED, SQL parse-only, preflight (DNS/TCP/SELECT 1)."
             ].join("\n");
             await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: pr, body });
+
+      - name: Upload deploy logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-deploy-logs
+          path: |
+            deploy_logs/**
+            deploy/*.sql
+          if-no-files-found: warn
+
