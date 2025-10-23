@@ -1,14 +1,9 @@
-name: Main: Deploy to Production
+name: Deploy to Production
 
 on:
   push:
-    branches: [ main ]
-    paths:
-      - "deploy/**/*.sql"
-      - ".github/workflows/**"
-      - "scripts/**"
-      - "rules.yml"
-      - "validate_sql.py"
+    branches:
+      - master    # ganti jika default branch kamu bukan 'main'
 
 concurrency:
   group: prod-deploy
@@ -21,48 +16,38 @@ defaults:
 jobs:
   deploy_prod:
     name: deploy_prod
-    runs-on: [self-hosted, Windows]
-<<<<<<< HEAD
-    environment: production   # ← akan menunggu APPROVAL dari required reviewers
-=======
-    environment: production   # butuh approval reviewer di Settings → Environments → production
->>>>>>> 8c226084d54964d8f8cefe1e2a3ab2f7baf2c656
+    runs-on: [self-hosted, Windows]  # pastikan runner punya label Windows
+    environment: production          # aktifkan Required reviewers di Settings > Environments > production
     steps:
       - uses: actions/checkout@v4
 
-      # Siapkan folder log
       - name: Prepare logs folder
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:GITHUB_WORKSPACE 'deploy_logs_prod'
-          if (!(Test-Path $root)) { New-Item -ItemType Directory -Path $root -Force | Out-Null }
+          if (!(Test-Path $root)) {
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+          }
           "LOGDIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
-<<<<<<< HEAD
-      - name: Ensure sqlcmd path (CMD)
-        run: |
-          echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
-          if not exist "%SQLCMD_EXE%" (
-            echo ❌ sqlcmd not found at %SQLCMD_EXE%
-            exit /b 1
-          )
-=======
-      # Resolve sqlcmd.exe (robust & aman)
       - name: Resolve sqlcmd
         shell: powershell
         env:
-          VAR_SQLCMD: ${{ vars.SQLCMD_EXE }}   # optional repo variable
+          VAR_SQLCMD: ${{ vars.SQLCMD_EXE }}   # optional: set di repo Variables
         run: |
           $ErrorActionPreference = 'Stop'
           function Exists($p){ if([string]::IsNullOrWhiteSpace($p)){return $false}; Test-Path $p }
           $candidates = @()
           if ($env:VAR_SQLCMD) { $candidates += $env:VAR_SQLCMD }
+
           try {
             $found = & where.exe sqlcmd 2>$null
             if ($LASTEXITCODE -eq 0) {
               $candidates += ($found -split "`r?`n" | Where-Object { $_ -and (Test-Path $_) })
             }
           } catch {}
+
           $candidates += @(
             "C:\Program Files\SqlCmd\sqlcmd.exe",
             "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe",
@@ -70,94 +55,64 @@ jobs:
             "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe",
             "C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe"
           )
+
           $pick = $candidates | Where-Object { Exists $_ } | Select-Object -First 1
           if (-not $pick) { throw "sqlcmd.exe not found. Set repo variable SQLCMD_EXE or install SQL tools." }
+
           "SQLCMD_EXE=$pick" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
           Write-Host "Using sqlcmd: $pick"
->>>>>>> 8c226084d54964d8f8cefe1e2a3ab2f7baf2c656
 
-      # Preflight
       - name: Echo target
         env:
-          H: ${{ secrets.PRD_DB_HOST }}
-          P: ${{ secrets.PRD_DB_PORT }}
-          D: ${{ secrets.PRD_DB_NAME }}
+          PROD_DB_HOST: ${{ secrets.PROD_DB_HOST }}
+          PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
+          PROD_DB_NAME: ${{ secrets.PROD_DB_NAME }}
         run: |
-<<<<<<< HEAD
-          set "PORT=%P%"
-          if "%PORT%"=="" set "PORT=1433"
-          echo Target: %H%,%PORT% / DB=%D%
+          set "PORT=%PROD_DB_PORT%" & if "%PORT%"=="" set "PORT=1433"
+          echo Target: %PROD_DB_HOST%,%PORT% / DB=%PROD_DB_NAME%
 
-       # Preflight — DNS
-      - name: DNS resolve
+      - name: DNS & TCP check
         env:
-          H: ${{ secrets.STG_DB_HOST }}
-        run: nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
-=======
-          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
-          echo Target: %H%,%PORT% / DB=%D%
-
-       - name: DNS resolve
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
+          PROD_DB_HOST: ${{ secrets.PROD_DB_HOST }}
+          PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
         run: |
-          nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
->>>>>>> 8c226084d54964d8f8cefe1e2a3ab2f7baf2c656
-
-      - name: TCP port check
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-<<<<<<< HEAD
-        run: |
-          set "PORT=%P%"
-          if "%PORT%"=="" set "PORT=1433"
-          echo Checking TCP connection to %H%:%PORT% ...
-          powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]'%PORT%') -InformationLevel Quiet)){exit 1}"
-=======
-        run: >
-          powershell -NoProfile -ExecutionPolicy Bypass -Command
-          "$ErrorActionPreference='Stop';
-           $p = '%P%'; if([string]::IsNullOrWhiteSpace($p)){$p='1433'};
-           if(-not (Test-NetConnection -ComputerName '%H%' -Port ([int]$p) -InformationLevel Quiet)){
-             Write-Host '❌ TCP connection failed'; exit 1
-           }
-           Write-Host '✅ TCP OK'"
->>>>>>> 8c226084d54964d8f8cefe1e2a3ab2f7baf2c656
+          nslookup %PROD_DB_HOST% || (echo DNS FAIL & exit /b 1)
+          powershell -Command "if(!(Test-NetConnection -ComputerName '%PROD_DB_HOST%' -Port ([int]('%PROD_DB_PORT%' -ne '' ? '%PROD_DB_PORT%' : '1433')) -InformationLevel Quiet)){exit 1}"
 
       - name: Test sqlcmd login (SELECT 1)
         env:
-          H: ${{ secrets.PRD_DB_HOST }}
-          P: ${{ secrets.PRD_DB_PORT }}
-          D: ${{ secrets.PRD_DB_NAME }}
-          U: ${{ secrets.PRD_DB_USER }}
-          W: ${{ secrets.PRD_DB_PASSWORD }}
+          PROD_DB_HOST: ${{ secrets.PROD_DB_HOST }}
+          PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
+          PROD_DB_NAME: ${{ secrets.PROD_DB_NAME }}
+          PROD_DB_USER: ${{ secrets.PROD_DB_USER }}
+          PROD_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
-          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
-          "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
+          set "PORT=%PROD_DB_PORT%" & if "%PORT%"=="" set "PORT=1433"
+          "%SQLCMD_EXE%" -S %PROD_DB_HOST%,%PORT% -d %PROD_DB_NAME% -U %PROD_DB_USER% -P %PROD_DB_PASSWORD% -l 10 -b -C -Q "SELECT 1"
 
-      # Deploy
       - name: Deploy to PRODUCTION (deploy/*.sql sorted)
         env:
-          H: ${{ secrets.PRD_DB_HOST }}
-          P: ${{ secrets.PRD_DB_PORT }}
-          D: ${{ secrets.PRD_DB_NAME }}
-          U: ${{ secrets.PRD_DB_USER }}
-          W: ${{ secrets.PRD_DB_PASSWORD }}
+          PROD_DB_HOST: ${{ secrets.PROD_DB_HOST }}
+          PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
+          PROD_DB_NAME: ${{ secrets.PROD_DB_NAME }}
+          PROD_DB_USER: ${{ secrets.PROD_DB_USER }}
+          PROD_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
           LOGDIR: ${{ env.LOGDIR }}
         run: |
           setlocal enabledelayedexpansion
           if "%LOGDIR%"=="" set "LOGDIR=%CD%\deploy_logs_prod"
           if not exist "%LOGDIR%" mkdir "%LOGDIR%"
-          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          set "PORT=%PROD_DB_PORT%" & if "%PORT%"=="" set "PORT=1433"
+
           if not exist deploy\*.sql (
             echo No SQL files in deploy\ .
             exit /b 0
           )
+
           for /f "delims=" %%F in ('dir /b /o:n deploy\*.sql') do (
             set "OUTLOG=%LOGDIR%\%%~nF.out.txt"
             echo Executing %%F ... > "!OUTLOG!"
-            "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%F" -o "!OUTLOG!"
+            "%SQLCMD_EXE%" -S %PROD_DB_HOST%,%PORT% -d %PROD_DB_NAME% -U %PROD_DB_USER% -P %PROD_DB_PASSWORD% -b -C -i "deploy\%%F" -o "!OUTLOG!"
             if errorlevel 1 (
               echo FAILED on %%F
               exit /b 1
