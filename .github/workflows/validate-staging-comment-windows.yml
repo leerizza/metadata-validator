@@ -222,8 +222,6 @@ jobs:
           if (Select-String -Path $files.FullName -Pattern $badQuotedId)  { throw 'Found SET QUOTED_IDENTIFIER OFF' }
 
       - name: SQL parse-only (syntax check, no execution)
-        id: parseonly
-        continue-on-error: true              # ← ini kunci: jangan blok pipeline
         shell: powershell
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -235,13 +233,20 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # fallback jika LOGDIR tidak terbaca
-          $logRoot = if ($env:LOGDIR -and $env:LOGDIR.Trim().Length -gt 0) { $env:LOGDIR } else { Join-Path $env:GITHUB_WORKSPACE 'deploy_logs' }
-          if (!(Test-Path -LiteralPath $logRoot)) { New-Item -ItemType Directory -Path $logRoot -Force | Out-Null }
+          # Pastikan LOGDIR ada (fallback jika tidak diexport)
+          $logRoot = if ($env:LOGDIR -and $env:LOGDIR.Trim().Length -gt 0) {
+            $env:LOGDIR
+          } else {
+            Join-Path $env:GITHUB_WORKSPACE 'deploy_logs'
+          }
+          if (!(Test-Path -LiteralPath $logRoot)) {
+            New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+          }
 
           $port   = if ($env:P) { $env:P } else { "1433" }
           $master = Join-Path $logRoot "parseonly.log"
 
+          # Kumpulkan semua file deploy/*.sql
           $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -ErrorAction SilentlyContinue
           if (-not $files) {
             "No SQL to parse." | Tee-Object -FilePath $master -Append
@@ -254,40 +259,49 @@ jobs:
           "" | Add-Content -LiteralPath $master -Encoding UTF8
 
           foreach ($f in $files) {
-            $src  = [IO.Path]::GetFullPath($f.FullName)
+            # Path absolut file SQL
+            $srcAbs = [IO.Path]::GetFullPath($f.FullName)
+            # Normalisasi path untuk directive :r (tanpa kutip, pakai slash)
+            $srcForR = $srcAbs -replace '\\','/'
+
             $wrap = Join-Path $logRoot ("__parse_" + $f.BaseName + ".sql")
             $out  = Join-Path $logRoot ("parse_" + $f.BaseName + ".log")
+
+            # Bangun wrapper: gunakan NOEXEC agar hanya compile (tanpa eksekusi)
+            $wrapper = @"
+            :ON ERROR EXIT
+            SET NOEXEC ON
+            :r $srcForR
+            SET NOEXEC OFF
+            "@
+                $wrapper | Set-Content -LiteralPath $wrap -Encoding ASCII
+
+                # Tulis info wrapper ke master log
+                "WRAPPER: $wrap" | Tee-Object -FilePath $master -Append
+                "SOURCE : $srcAbs"  | Tee-Object -FilePath $master -Append
+                "----- wrapper content begin -----" | Tee-Object -FilePath $master -Append
+                Get-Content -LiteralPath $wrap | Tee-Object -FilePath $master -Append
+                "----- wrapper content end   -----" | Tee-Object -FilePath $master -Append
+
+                # Jalankan wrapper dengan -i (BUKAN -Q). Hilangkan -f (tidak didukung di beberapa sqlcmd lama).
+                & "$env:SQLCMD_EXE" `
+                  -S "$($env:H),$port" -d "$($env:D)" -U "$($env:U)" -P "$env:W" `
+                  -b -C -i "$wrap" -o "$out"
+
+                if ($LASTEXITCODE -ne 0) {
+                  "FAILED -> $srcAbs (see $out)" | Tee-Object -FilePath $master -Append
+                  if (Test-Path -LiteralPath $out) {
+                    Get-Content -LiteralPath $out -Tail 100 | Tee-Object -FilePath $master -Append
+                  } else {
+                    "Log file not found (sqlcmd stopped early)" | Tee-Object -FilePath $master -Append
+                  }
+                  throw ("Parse failed: {0}" -f $f.Name)
+                } else {
+                  "OK -> $srcAbs" | Tee-Object -FilePath $master -Append
+                }
+                "" | Add-Content -LiteralPath $master -Encoding UTF8
               }
 
-            @(
-              ":ON ERROR EXIT",
-              "SET NOEXEC ON",
-              ":r `"$src`"",
-              "SET NOEXEC OFF"
-            ) | Set-Content -LiteralPath $wrap -Encoding UTF8
-
-            "WRAPPER: $wrap" | Tee-Object -FilePath $master -Append
-            "SOURCE : $src"  | Tee-Object -FilePath $master -Append
-            "----- wrapper content begin -----" | Tee-Object -FilePath $master -Append
-            Get-Content -LiteralPath $wrap | Tee-Object -FilePath $master -Append
-            "----- wrapper content end   -----" | Tee-Object -FilePath $master -Append
-
-            & "$env:SQLCMD_EXE" `
-              -S "$($env:H),$port" -d "$($env:D)" -U "$($env:U)" -P "$env:W" `
-              -b -C -i "$wrap" -o "$out"
-
-
-            if ($LASTEXITCODE -ne 0) {
-              "FAILED -> $src (see $out)" | Tee-Object -FilePath $master -Append
-              if (Test-Path $out) {
-                Get-Content -LiteralPath $out -Tail 100 | Tee-Object -FilePath $master -Append
-              } else {
-                "⚠️ Log file not found (sqlcmd stopped early)" | Tee-Object -FilePath $master -Append
-              }
-              throw ("Parse failed: {0}" -f $f.Name)
-            } else {
-              "OK -> $src" | Tee-Object -FilePath $master -Append
-            }
 
 
       # (opsional) tampilkan tail di UI kalau parse-only gagal
