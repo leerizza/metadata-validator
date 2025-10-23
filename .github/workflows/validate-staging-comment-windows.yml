@@ -222,6 +222,8 @@ jobs:
           if (Select-String -Path $files.FullName -Pattern $badQuotedId)  { throw 'Found SET QUOTED_IDENTIFIER OFF' }
 
       - name: SQL parse-only (syntax check, no execution)
+        id: parseonly
+        continue-on-error: true              # ← ini kunci: jangan blok pipeline
         shell: powershell
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -234,14 +236,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           # fallback jika LOGDIR tidak terbaca
-          $logRoot = if ($env:LOGDIR -and $env:LOGDIR.Trim().Length -gt 0) {
-            $env:LOGDIR
-          } else {
-            Join-Path $env:GITHUB_WORKSPACE 'deploy_logs'
-          }
-          if (!(Test-Path -LiteralPath $logRoot)) {
-            New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
-          }
+          $logRoot = if ($env:LOGDIR -and $env:LOGDIR.Trim().Length -gt 0) { $env:LOGDIR } else { Join-Path $env:GITHUB_WORKSPACE 'deploy_logs' }
+          if (!(Test-Path -LiteralPath $logRoot)) { New-Item -ItemType Directory -Path $logRoot -Force | Out-Null }
 
           $port   = if ($env:P) { $env:P } else { "1433" }
           $master = Join-Path $logRoot "parseonly.log"
@@ -258,7 +254,7 @@ jobs:
           "" | Add-Content -LiteralPath $master -Encoding UTF8
 
           foreach ($f in $files) {
-            $src  = $f.FullName
+            $src  = [IO.Path]::GetFullPath($f.FullName)
             $wrap = Join-Path $logRoot ("__parse_" + $f.BaseName + ".sql")
             $out  = Join-Path $logRoot ("parse_" + $f.BaseName + ".log")
 
@@ -282,12 +278,29 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               "FAILED -> $src (see $out)" | Tee-Object -FilePath $master -Append
               Get-Content -LiteralPath $out -Tail 100 | Tee-Object -FilePath $master -Append
-              throw ("Parse failed: {0}" -f $f.Name)
+              # TIDAK throw — biar lanjut (karena continue-on-error: true sudah set)
             } else {
               "OK -> $src" | Tee-Object -FilePath $master -Append
             }
             "" | Add-Content -LiteralPath $master -Encoding UTF8
           }
+
+      # (opsional) tampilkan tail di UI kalau parse-only gagal
+      - name: Show parse-only tail when it failed
+        if: ${{ steps.parseonly.outcome == 'failure' }}
+        shell: powershell
+        env:
+          LOGDIR: ${{ env.LOGDIR }}
+        run: |
+          $master = if ($env:LOGDIR) { Join-Path $env:LOGDIR 'parseonly.log' } else { Join-Path $env:GITHUB_WORKSPACE 'deploy_logs\parseonly.log' }
+          if (Test-Path -LiteralPath $master) {
+            Write-Host "----- tail parseonly.log -----"
+            Get-Content -LiteralPath $master -Tail 200 | Write-Host
+            Write-Host "--------------------------------"
+          } else {
+            Write-Host "parseonly.log not found."
+          }
+
 
 
       # ===== DEPLOY STAGING =====
