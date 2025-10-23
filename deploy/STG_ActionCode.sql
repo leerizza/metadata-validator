@@ -6,5 +6,3 @@ CREATE TABLE [dbo].[stg_actioncode](
 );
 END;
 
-
-
