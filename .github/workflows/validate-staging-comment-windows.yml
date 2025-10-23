@@ -257,6 +257,7 @@ jobs:
             $src  = [IO.Path]::GetFullPath($f.FullName)
             $wrap = Join-Path $logRoot ("__parse_" + $f.BaseName + ".sql")
             $out  = Join-Path $logRoot ("parse_" + $f.BaseName + ".log")
+              }
 
             @(
               ":ON ERROR EXIT",
