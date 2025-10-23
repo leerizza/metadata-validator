@@ -42,9 +42,9 @@ jobs:
 
       - name: Echo target
         env:
-          H: ${{ secrets.PRD_DB_HOST }}
-          P: ${{ secrets.PRD_DB_PORT }}
-          D: ${{ secrets.PRD_DB_NAME }}
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
@@ -52,19 +52,19 @@ jobs:
 
       - name: DNS & TCP check
         env:
-          H: ${{ secrets.PRD_DB_HOST }}
-          P: ${{ secrets.PRD_DB_PORT }}
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
         run: |
           nslookup %H% || (echo DNS FAIL & exit /b 1)
           powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]('%P%' -ne '' ? '%P%' : '1433')) -InformationLevel Quiet)){exit 1}"
 
       - name: Test sqlcmd login (SELECT 1)
         env:
-          H: ${{ secrets.PRD_DB_HOST }}
-          P: ${{ secrets.PRD_DB_PORT }}
-          D: ${{ secrets.PRD_DB_NAME }}
-          U: ${{ secrets.PRD_DB_USER }}
-          W: ${{ secrets.PRD_DB_PASSWORD }}
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
@@ -72,11 +72,11 @@ jobs:
 
       - name: Deploy to PRODUCTION (deploy/*.sql sorted)
         env:
-          H: ${{ secrets.PRD_DB_HOST }}
-          P: ${{ secrets.PRD_DB_PORT }}
-          D: ${{ secrets.PRD_DB_NAME }}
-          U: ${{ secrets.PRD_DB_USER }}
-          W: ${{ secrets.PRD_DB_PASSWORD }}
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
           LOGDIR: ${{ env.LOGDIR }}
         run: |
           setlocal enabledelayedexpansion
