@@ -273,17 +273,21 @@ jobs:
 
             & "$env:SQLCMD_EXE" `
               -S "$($env:H),$port" -d "$($env:D)" -U "$($env:U)" -P "$env:W" `
-              -b -C -i "$wrap" -f 65001 -o "$out"
+              -b -C -i "$wrap" -o "$out"
+
 
             if ($LASTEXITCODE -ne 0) {
               "FAILED -> $src (see $out)" | Tee-Object -FilePath $master -Append
-              Get-Content -LiteralPath $out -Tail 100 | Tee-Object -FilePath $master -Append
-              # TIDAK throw — biar lanjut (karena continue-on-error: true sudah set)
+              if (Test-Path $out) {
+                Get-Content -LiteralPath $out -Tail 100 | Tee-Object -FilePath $master -Append
+              } else {
+                "⚠️ Log file not found (sqlcmd stopped early)" | Tee-Object -FilePath $master -Append
+              }
+              throw ("Parse failed: {0}" -f $f.Name)
             } else {
               "OK -> $src" | Tee-Object -FilePath $master -Append
             }
-            "" | Add-Content -LiteralPath $master -Encoding UTF8
-          }
+
 
       # (opsional) tampilkan tail di UI kalau parse-only gagal
       - name: Show parse-only tail when it failed
