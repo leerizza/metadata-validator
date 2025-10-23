@@ -2,13 +2,14 @@ name: Deploy to PRODUCTION
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main ]         # Otomatis setelah merge ke main
     paths:
       - "deploy/**/*.sql"
-      - ".github/workflows/**"
       - "scripts/**"
       - "rules.yml"
       - "validate_sql.py"
+      - ".github/workflows/**"
+  workflow_dispatch:            # Manual trigger opsional (nonaktif by default)
 
 concurrency:
   group: prod-${{ github.ref }}
@@ -21,7 +22,9 @@ defaults:
 jobs:
   deploy_prod:
     runs-on: [self-hosted, Windows]
-    environment: production   # ← akan menunggu APPROVAL dari required reviewers
+    # environment: production   # 🚫 Dihapus agar tidak menunggu approval
+    timeout-minutes: 30
+
     steps:
       - uses: actions/checkout@v4
 
@@ -42,9 +45,9 @@ jobs:
 
       - name: Echo target
         env:
-          H: ${{ secrets.PROD_DB_HOST }}
-          P: ${{ secrets.PROD_DB_PORT }}
-          D: ${{ secrets.PROD_DB_NAME }}
+          H: ${{ secrets.PRD_DB_HOST }}
+          P: ${{ secrets.PRD_DB_PORT }}
+          D: ${{ secrets.PRD_DB_NAME }}
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
@@ -52,19 +55,19 @@ jobs:
 
       - name: DNS & TCP check
         env:
-          H: ${{ secrets.PROD_DB_HOST }}
-          P: ${{ secrets.PROD_DB_PORT }}
+          H: ${{ secrets.PRD_DB_HOST }}
+          P: ${{ secrets.PRD_DB_PORT }}
         run: |
           nslookup %H% || (echo DNS FAIL & exit /b 1)
           powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]('%P%' -ne '' ? '%P%' : '1433')) -InformationLevel Quiet)){exit 1}"
 
       - name: Test sqlcmd login (SELECT 1)
         env:
-          H: ${{ secrets.PROD_DB_HOST }}
-          P: ${{ secrets.PROD_DB_PORT }}
-          D: ${{ secrets.PROD_DB_NAME }}
-          U: ${{ secrets.PROD_DB_USER }}
-          W: ${{ secrets.PROD_DB_PASSWORD }}
+          H: ${{ secrets.PRD_DB_HOST }}
+          P: ${{ secrets.PRD_DB_PORT }}
+          D: ${{ secrets.PRD_DB_NAME }}
+          U: ${{ secrets.PRD_DB_USER }}
+          W: ${{ secrets.PRD_DB_PASSWORD }}
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
@@ -72,11 +75,11 @@ jobs:
 
       - name: Deploy to PRODUCTION (deploy/*.sql sorted)
         env:
-          H: ${{ secrets.PROD_DB_HOST }}
-          P: ${{ secrets.PROD_DB_PORT }}
-          D: ${{ secrets.PROD_DB_NAME }}
-          U: ${{ secrets.PROD_DB_USER }}
-          W: ${{ secrets.PROD_DB_PASSWORD }}
+          H: ${{ secrets.PRD_DB_HOST }}
+          P: ${{ secrets.PRD_DB_PORT }}
+          D: ${{ secrets.PRD_DB_NAME }}
+          U: ${{ secrets.PRD_DB_USER }}
+          W: ${{ secrets.PRD_DB_PASSWORD }}
           LOGDIR: ${{ env.LOGDIR }}
         run: |
           setlocal enabledelayedexpansion
@@ -93,7 +96,7 @@ jobs:
             echo Executing %%F ... > "!OUTLOG!"
             "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%F" -o "!OUTLOG!"
             if errorlevel 1 (
-              echo FAILED on %%F
+              echo ❌ FAILED on %%F
               exit /b 1
             )
           )
