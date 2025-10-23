@@ -1,72 +1,34 @@
-name: Validate & Deploy to STAGING
+name: Deploy to STAGING (Windows Self-Hosted)
 
 on:
-  pull_request:
-    paths:
-      - "tables/**/*.yml"
-      - "tables/**/*.yaml"
-      - "deploy/**/*.sql"
-      - "rules.yml"
-      - "validate_sql.py"
-      - "scripts/**"
-      - ".github/workflows/**"
-
-concurrency:
-  group: pr-${{ github.event.pull_request.number || github.ref }}-${{ github.workflow }}
-  cancel-in-progress: true
-
-defaults:
-  run:
-    shell: cmd
+  workflow_dispatch:
 
 jobs:
-  validate:
-    runs-on: [self-hosted, Windows]
-    steps:
-      - uses: actions/checkout@v4
-
-      # (opsional) type-guard sederhana: larang MAX & legacy LOB
-      - name: Block disallowed types (no MAX, no legacy LOB)
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $files = Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse -ErrorAction SilentlyContinue
-          if (-not $files) { Write-Host 'No SQL files.'; exit 0 }
-          $patMax    = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)'
-          $patLegacy = '\b(?:text|ntext|image)\b'
-          $bad    = Select-String -Path $files.FullName -Pattern $patMax
-          $legacy = Select-String -Path $files.FullName -Pattern $patLegacy
-          if (($bad | Measure-Object).Count -gt 0 -or ($legacy | Measure-Object).Count -gt 0) {
-            Write-Host 'Found disallowed type(s):'
-            if ($bad)    { ($bad.Path    | Sort-Object -Unique) | ForEach-Object { " - $_" } }
-            if ($legacy) { ($legacy.Path | Sort-Object -Unique) | ForEach-Object { " - $_" } }
-            exit 1
-          }
-          Write-Host 'SQL type validation passed.'
-
   deploy_staging:
-    needs: validate
+    if: ${{ runner.os == 'Windows' }} 
     runs-on: [self-hosted, Windows]
-    environment: staging   # ← secrets staging, tanpa approval
+    environment: staging
+
+    defaults:
+      run:
+        shell: cmd
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - name: Prepare logs folder
-        shell: powershell
-        run: |
-          $root = Join-Path $env:GITHUB_WORKSPACE 'deploy_logs'
-          if (!(Test-Path $root)) { New-Item -ItemType Directory -Path $root -Force | Out-Null }
-          "LOGDIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-
+      # --- SQLCMD PATH -------------------------------------------------------
       - name: Ensure sqlcmd path
         run: |
-          echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
+          set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
           if not exist "%SQLCMD_EXE%" (
-            echo ❌ sqlcmd not found at %SQLCMD_EXE%
+            echo ❌ sqlcmd not found in expected path.
             exit /b 1
           )
+          echo ✅ Found sqlcmd at "%SQLCMD_EXE%"
+        shell: cmd
 
-       # Preflight — tampilkan target
+      # --- PRE-FLIGHT CHECKS -------------------------------------------------
       - name: Echo target
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -75,26 +37,30 @@ jobs:
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-          if "%H%"=="" ( echo ❌ Secret STG_DB_HOST kosong & exit /b 1 )
-          echo Using sqlcmd: %SQLCMD_EXE%
+          if "%H%"=="" (
+            echo ❌ Secret STG_DB_HOST kosong
+            exit /b 1
+          )
           echo Target: %H%,%PORT% / DB=%D%
 
-      # Preflight — DNS
       - name: DNS resolve
         env:
           H: ${{ secrets.STG_DB_HOST }}
-        run: nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
+        run: |
+          nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
 
-      # Preflight — TCP
       - name: TCP port check
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
-        run: |
-          set "PORT=%P%"
-          if "%PORT%"=="" set "PORT=1433"
-          echo Checking TCP connection to %H%:%PORT% ...
-          powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]'%PORT%') -InformationLevel Quiet)){exit 1}"
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           $p = '%P%'; if([string]::IsNullOrWhiteSpace($p)){$p='1433'};
+           if(-not (Test-NetConnection -ComputerName '%H%' -Port ([int]$p) -InformationLevel Quiet)){
+             Write-Host '❌ TCP connection failed'; exit 1
+           }
+           Write-Host '✅ TCP OK'"
 
       - name: Test sqlcmd login (SELECT 1)
         env:
@@ -106,8 +72,31 @@ jobs:
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-          "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
+          "C:\Program Files\SqlCmd\sqlcmd.exe" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
+          if errorlevel 1 exit /b 1
 
+      # --- SQL TYPE VALIDATION GUARD -----------------------------------------
+      - name: Block disallowed types in deploy SQL (no MAX, no legacy LOB)
+        run: >
+          powershell -NoProfile -ExecutionPolicy Bypass -Command
+          "$ErrorActionPreference='Stop';
+           $bad = @();
+           $re = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)';
+           $legacy = '\b(?:text|ntext|image)\b';
+           if(Test-Path 'deploy'){
+             Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse | ForEach-Object {
+               $t = (Get-Content $_.FullName -Raw).ToLower();
+               if($t -match $re -or $t -match $legacy){ $bad += $_.FullName }
+             }
+           }
+           if($bad.Count -gt 0){
+             Write-Host '❌ Disallowed types ditemukan di file berikut:';
+             $bad | ForEach-Object { Write-Host (' - ' + $_) };
+             exit 1
+           }
+           Write-Host '✅ Tidak ada tipe terlarang di deploy/*.sql.'"
+
+      # --- DEPLOYMENT --------------------------------------------------------
       - name: Deploy to STAGING (deploy/*.sql sorted)
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -115,34 +104,19 @@ jobs:
           D: ${{ secrets.STG_DB_NAME }}
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
-          LOGDIR: ${{ env.LOGDIR }}
         run: |
           setlocal enabledelayedexpansion
-          if "%LOGDIR%"=="" set "LOGDIR=%CD%\deploy_logs"
-          if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+          set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-          if not exist deploy\*.sql (
-            echo No SQL files in deploy\ .
-            exit /b 0
-          )
-          for /f "delims=" %%F in ('dir /b /o:n deploy\*.sql') do (
-            set "OUTLOG=%LOGDIR%\%%~nF.out.txt"
-            echo Executing %%F ... > "!OUTLOG!"
-            "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%F" -o "!OUTLOG!"
+
+          echo Running deploy scripts on %H%,%PORT% [%D%] ...
+          for /f "delims=" %%f in ('dir /b /o:n deploy\*.sql') do (
+            echo Executing %%f ...
+            "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%f"
             if errorlevel 1 (
-              echo FAILED on %%F
+              echo ❌ FAILED ON %%f
               exit /b 1
             )
           )
-          echo ✅ STAGING deploy done.
-
-      - name: Upload deploy logs
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: staging-deploy-logs
-          path: |
-            deploy_logs/**
-            deploy/*.sql
-          if-no-files-found: warn
+          echo ✅ All deploy SQL executed successfully.
