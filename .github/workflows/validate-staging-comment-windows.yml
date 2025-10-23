@@ -263,6 +263,7 @@ jobs:
             $srcAbs = [IO.Path]::GetFullPath($f.FullName)
             # Normalisasi path untuk directive :r (tanpa kutip, pakai slash)
             $srcForR = $srcAbs -replace '\\','/'
+            }
 
             $wrap = Join-Path $logRoot ("__parse_" + $f.BaseName + ".sql")
             $out  = Join-Path $logRoot ("parse_" + $f.BaseName + ".log")
