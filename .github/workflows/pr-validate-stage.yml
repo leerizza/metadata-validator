@@ -66,6 +66,7 @@ jobs:
             exit /b 1
           )
 
+       # Preflight — tampilkan target
       - name: Echo target
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -74,15 +75,26 @@ jobs:
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
+          if "%H%"=="" ( echo ❌ Secret STG_DB_HOST kosong & exit /b 1 )
+          echo Using sqlcmd: %SQLCMD_EXE%
           echo Target: %H%,%PORT% / DB=%D%
 
-      - name: DNS & TCP check
+      # Preflight — DNS
+      - name: DNS resolve
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+        run: nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
+
+      # Preflight — TCP
+      - name: TCP port check
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
         run: |
-          nslookup %H% || (echo DNS FAIL & exit /b 1)
-          powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]('%P%' -ne '' ? '%P%' : '1433')) -InformationLevel Quiet)){exit 1}"
+          set "PORT=%P%"
+          if "%PORT%"=="" set "PORT=1433"
+          echo Checking TCP connection to %H%:%PORT% ...
+          powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]'%PORT%') -InformationLevel Quiet)){exit 1}"
 
       - name: Test sqlcmd login (SELECT 1)
         env:
