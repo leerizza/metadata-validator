@@ -2,14 +2,13 @@ name: Deploy to PRODUCTION
 
 on:
   push:
-    branches: [ main ]         # Otomatis setelah merge ke main
+    branches: [ main ]
     paths:
       - "deploy/**/*.sql"
+      - ".github/workflows/**"
       - "scripts/**"
       - "rules.yml"
       - "validate_sql.py"
-      - ".github/workflows/**"
-  workflow_dispatch:            # Manual trigger opsional (nonaktif by default)
 
 concurrency:
   group: prod-${{ github.ref }}
@@ -22,9 +21,7 @@ defaults:
 jobs:
   deploy_prod:
     runs-on: [self-hosted, Windows]
-    # environment: production   # 🚫 Dihapus agar tidak menunggu approval
-    timeout-minutes: 30
-
+    environment: production   # ← akan menunggu APPROVAL dari required reviewers
     steps:
       - uses: actions/checkout@v4
 
@@ -35,12 +32,16 @@ jobs:
           if (!(Test-Path $root)) { New-Item -ItemType Directory -Path $root -Force | Out-Null }
           "LOGDIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
-      - name: Ensure sqlcmd path
+      - name: Ensure sqlcmd path (CMD)
         run: |
-          echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
-          if not exist "%SQLCMD_EXE%" (
-            echo ❌ sqlcmd not found at %SQLCMD_EXE%
-            exit /b 
+            set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
+            if not exist "%SQLCMD_EXE%" (
+            echo sqlcmd not found at %SQLCMD_EXE%
+            exit /b 1
+            )
+            echo Using sqlcmd: %SQLCMD_EXE%
+            echo SQLCMD_EXE=%SQLCMD_EXE%>>"%GITHUB_ENV%"
+
 
       - name: Echo target
         env:
@@ -50,21 +51,19 @@ jobs:
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
-          if "%H%"=="" ( echo ❌ Secret PROD_DB_HOST kosong & exit /b 1 )
-          echo Using sqlcmd: %SQLCMD_EXE%
           echo Target: %H%,%PORT% / DB=%D%
 
-      # Preflight — DNS
+       # Preflight — DNS
       - name: DNS resolve
         env:
-          H: ${{ secrets.PROD_DB_HOST }}
+          H: ${{ secrets.STG_DB_HOST }}
         run: nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
 
       # Preflight — TCP
       - name: TCP port check
         env:
-          H: ${{ secrets.PROD_DB_HOST }}
-          P: ${{ secrets.PROD_DB_PORT }}
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
         run: |
           set "PORT=%P%"
           if "%PORT%"=="" set "PORT=1433"
@@ -106,7 +105,7 @@ jobs:
             echo Executing %%F ... > "!OUTLOG!"
             "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "deploy\%%F" -o "!OUTLOG!"
             if errorlevel 1 (
-              echo ❌ FAILED on %%F
+              echo FAILED on %%F
               exit /b 1
             )
           )
