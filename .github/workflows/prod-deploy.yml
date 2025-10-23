@@ -71,16 +71,23 @@ jobs:
           set "PORT=%PROD_DB_PORT%" & if "%PORT%"=="" set "PORT=1433"
           echo Target: %PROD_DB_HOST%,%PORT% / DB=%PROD_DB_NAME%
 
+      # DNS & TCP check (PowerShell supaya jelas)
       - name: DNS & TCP check
+        shell: powershell
         env:
-          PROD_DB_HOST: ${{ secrets.PROD_DB_HOST }}
-          PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
+            PROD_DB_HOST: ${{ secrets.PROD_DB_HOST }}
+            PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
         run: |
-          nslookup %PROD_DB_HOST% || (echo DNS FAIL & exit /b 1)
-          set "PORT=%P%"
-          if "%PORT%"=="" set "PORT=1433"
-          echo Checking TCP connection to %H%:%PORT% ...
-          powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]'%PORT%') -InformationLevel Quiet)){exit 1}"
+            $ErrorActionPreference = 'Stop'
+            $host = $env:PROD_DB_HOST
+            if ([string]::IsNullOrWhiteSpace($host)) { throw "PROD_DB_HOST is empty" }
+            $port = if ($env:PROD_DB_PORT) { [int]$env:PROD_DB_PORT } else { 1433 }
+            Write-Host "Checking TCP connection to $host:$port ..."
+            nslookup $host | Out-Host
+            if (-not (Test-NetConnection -ComputerName $host -Port $port -InformationLevel Quiet)) {
+            throw "TCP FAILED to $host:$port"
+            }
+            Write-Host "TCP OK"
 
       - name: Test sqlcmd login (SELECT 1)
         env:
