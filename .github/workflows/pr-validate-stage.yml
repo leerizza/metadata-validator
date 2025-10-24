@@ -154,12 +154,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Set-Location "$env:GITHUB_WORKSPACE"
-
-          # Pastikan repo dianggap aman & non-interaktif
-          $env:GIT_TERMINAL_PROMPT = '0'
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
 
-          # Full fetch (tanpa menggabung argumen jadi satu string)
+          # Fetch all refs
           try {
             git fetch --all --tags --prune 2>$null
           } catch {
@@ -169,15 +166,12 @@ jobs:
 
           $eventName = '${{ github.event_name }}'
           $beforeSha = '${{ github.event.before }}'
-          $baseRef   = '${{ github.base_ref }}'  # tersedia saat PR
+          $baseRef   = '${{ github.base_ref }}'
 
-          # ==== Tentukan range diff ====
           if ($eventName -eq 'pull_request' -and $baseRef) {
-            # Pastikan base branch ada secara lokal (PR context sering shallow)
             Write-Host "🔄 Fetching base branch origin/$baseRef ..."
             try {
-              # RefSpec: ambil origin/<base> ke local branch <base>
-              git fetch origin $baseRef:$baseRef --depth=1 2>$null
+              git fetch origin "$($baseRef):$($baseRef)" --depth=1 2>$null
             } catch {
               Write-Host "::warning title=Fetch base_ref failed::Will fallback to local HEAD~1"
             }
@@ -188,15 +182,13 @@ jobs:
             }
           }
           else {
-            # push
             if ([string]::IsNullOrWhiteSpace($beforeSha) -or $beforeSha -match '^0+$') {
-              $range = 'HEAD~1...HEAD'   # first push / unknown before
+              $range = 'HEAD~1...HEAD'
             } else {
               $range = "$beforeSha...HEAD"
             }
           }
 
-          # Ambil hanya deploy/*.sql yang Added/Modified/Renamed
           $changed = git diff --name-only --diff-filter=AMR $range -- "deploy/*.sql"
           $hasChanges = if ($changed) { 'true' } else { 'false' }
 
@@ -211,11 +203,11 @@ jobs:
             Write-Host "::notice title=No changed SQL::Skipping backup/deploy steps."
           }
 
-          # Outputs untuk step berikutnya
           "has_changes=$hasChanges" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           if ($hasChanges -eq 'true') {
             "changed_list=deploy\_changed_sql.txt" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
+
 
       
       - name: Filter to CREATE/ALTER TABLE (PR)
