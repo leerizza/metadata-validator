@@ -24,6 +24,8 @@ jobs:
     runs-on: [self-hosted, Windows]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # - name: Resolve Python and create venv
       #   run: |
@@ -147,39 +149,21 @@ jobs:
           "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
 
       - name: Compute changed SQL (robust)
+        id: changes
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-
-          # Pastikan folder kerja dianggap aman oleh Git di self-hosted Windows
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
+          git fetch --all --tags --prune 2>$null
 
-          # Unshallow hanya jika benar-benar shallow
-          $isShallow = (git rev-parse --is-shallow-repository 2>$null).Trim()
-          if ($isShallow -eq 'true') {
-            git fetch --prune --unshallow 2>$null
-          } else {
-            git fetch --all --tags --prune 2>$null
-          }
-
-          # Tentukan range diff:
-          # - push: pakai SHA "before...HEAD"
-          # - jika first push (before = 0…0) fallback ke HEAD~1...HEAD
-          # - PR: bandingkan base branch dengan HEAD
           $eventName = '${{ github.event_name }}'
           $beforeSha = '${{ github.event.before }}'
-          $baseRef   = '${{ github.base_ref }}'  # hanya ada di PR
+          $baseRef   = '${{ github.base_ref }}'
 
-          if ($eventName -eq 'pull_request') {
-            # PR: fetch base, lalu diff base...HEAD
-            if ($baseRef -and $baseRef -ne '') {
-              git fetch origin $baseRef --depth=1 2>$null
-              $range = "origin/$baseRef...HEAD"
-            } else {
-              $range = 'HEAD~1...HEAD'
-            }
+          if ($eventName -eq 'pull_request' -and $baseRef) {
+            git fetch origin $baseRef --depth=1 2>$null
+            $range = "origin/$baseRef...HEAD"
           } else {
-            # push:
             if ([string]::IsNullOrWhiteSpace($beforeSha) -or $beforeSha -match '^0+$') {
               $range = 'HEAD~1...HEAD'
             } else {
@@ -187,20 +171,21 @@ jobs:
             }
           }
 
-          # Ambil hanya file deploy/*.sql yang ditambah/ubah/rename
           $changed = git diff --name-only --diff-filter=AMR $range -- "deploy/*.sql"
+          $hasChanges = if ($changed) { 'true' } else { 'false' }
 
-          if (-not $changed) {
+          if ($hasChanges -eq 'true') {
+            $listFile = Join-Path $env:GITHUB_WORKSPACE 'deploy\_changed_sql.txt'
+            $changed | Sort-Object | Set-Content -LiteralPath $listFile -Encoding UTF8
+            "CHANGED_SQL_LIST=$listFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+            Write-Host "Changed SQL files (range $range):"
+            Get-Content $listFile | % { " - $_" }
+          } else {
             Write-Host "No changed deploy SQL in range: $range"
-            exit 0
+            Write-Host "::notice title=No changed SQL::Skipping backup and deploy."
           }
 
-          $listFile = Join-Path $env:GITHUB_WORKSPACE 'deploy\_changed_sql.txt'
-          $changed | Sort-Object | Set-Content -LiteralPath $listFile -Encoding UTF8
-          "CHANGED_SQL_LIST=$listFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-
-          Write-Host "Changed SQL files (range $range):"
-          Get-Content $listFile | ForEach-Object { " - $_" }
+          "has_changes=$hasChanges" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       
       - name: Filter to CREATE/ALTER TABLE (PR)
