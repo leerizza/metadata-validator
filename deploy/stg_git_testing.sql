@@ -2,7 +2,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[st
 BEGIN
   CREATE TABLE [dbo].[stg_git_testing] (
     id INT NOT NULL PRIMARY KEY,
-    branch_name VARCHAR(200) NOT NULL,
-    user_name VARCHAR(200) NULL
+    branch_name VARCHAR(100) NOT NULL,
+    full_name VARCHAR(100) NULL
   );
 END;
