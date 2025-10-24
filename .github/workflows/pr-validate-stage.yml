@@ -153,58 +153,85 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          Set-Location "$env:GITHUB_WORKSPACE"
+
+          # Pastikan repo dianggap aman & non-interaktif
+          $env:GIT_TERMINAL_PROMPT = '0'
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
-          git fetch --all --tags --prune 2>$null
+
+          # Full fetch (tanpa menggabung argumen jadi satu string)
+          try {
+            git fetch --all --tags --prune 2>$null
+          } catch {
+            Write-Host "::warning title=git fetch failed::Retrying with 'origin --prune'"
+            try { git fetch origin --prune 2>$null } catch { Write-Host "::warning title=git fetch still failed::Using local range only." }
+          }
+
           $eventName = '${{ github.event_name }}'
           $beforeSha = '${{ github.event.before }}'
-          $baseRef   = '${{ github.base_ref }}'
+          $baseRef   = '${{ github.base_ref }}'  # tersedia saat PR
+
+          # ==== Tentukan range diff ====
           if ($eventName -eq 'pull_request' -and $baseRef) {
-            git fetch origin $baseRef --depth=1 2>$null
-            $range = "origin/$baseRef...HEAD"
-          } else {
-            if ([string]::IsNullOrWhiteSpace($beforeSha) -or $beforeSha -match '^0+$') {
+            # Pastikan base branch ada secara lokal (PR context sering shallow)
+            Write-Host "🔄 Fetching base branch origin/$baseRef ..."
+            try {
+              # RefSpec: ambil origin/<base> ke local branch <base>
+              git fetch origin $baseRef:$baseRef --depth=1 2>$null
+            } catch {
+              Write-Host "::warning title=Fetch base_ref failed::Will fallback to local HEAD~1"
+            }
+            if ((git rev-parse --verify $baseRef 2>$null) -and $LASTEXITCODE -eq 0) {
+              $range = "$baseRef...HEAD"
+            } else {
               $range = 'HEAD~1...HEAD'
+            }
+          }
+          else {
+            # push
+            if ([string]::IsNullOrWhiteSpace($beforeSha) -or $beforeSha -match '^0+$') {
+              $range = 'HEAD~1...HEAD'   # first push / unknown before
             } else {
               $range = "$beforeSha...HEAD"
             }
           }
+
+          # Ambil hanya deploy/*.sql yang Added/Modified/Renamed
           $changed = git diff --name-only --diff-filter=AMR $range -- "deploy/*.sql"
           $hasChanges = if ($changed) { 'true' } else { 'false' }
+
           if ($hasChanges -eq 'true') {
             $listFile = Join-Path $env:GITHUB_WORKSPACE 'deploy\_changed_sql.txt'
             $changed | Sort-Object | Set-Content -LiteralPath $listFile -Encoding UTF8
             "CHANGED_SQL_LIST=$listFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-            Write-Host "Changed SQL files (range $range):"
-            Get-Content $listFile | % { " - $_" }
+            Write-Host "Changed SQL (range $range):"
+            Get-Content $listFile | ForEach-Object { " - $_" }
           } else {
             Write-Host "No changed deploy SQL in range: $range"
-            Write-Host "::notice title=No changed SQL::Skipping backup and deploy."
+            Write-Host "::notice title=No changed SQL::Skipping backup/deploy steps."
           }
+
+          # Outputs untuk step berikutnya
           "has_changes=$hasChanges" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          if ($hasChanges -eq 'true') {
+            "changed_list=deploy\_changed_sql.txt" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
       
       - name: Filter to CREATE/ALTER TABLE (PR)
-        if: ${{ env.CHANGED_SQL_LIST != '' }}
+        if: steps.changes.outputs.has_changes == 'true'
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Stop'
-          $list = Get-Content $env:CHANGED_SQL_LIST
-          if (-not $list) { exit 0 }
+          $list = Get-Content $env:GITHUB_WORKSPACE\deploy\_changed_sql.txt
           $rx = [regex]'(?is)\b(?:create|alter)\s+table\b'
           $keep = @()
-          foreach ($f in $list) {
-            if (Test-Path $f) {
-              $t = Get-Content $f -Raw
-              if ($rx.IsMatch($t)) { $keep += $f }
-            }
-          }
+          foreach ($f in $list) { if (Test-Path $f) { $t = Get-Content $f -Raw; if ($rx.IsMatch($t)) { $keep += $f } } }
           if (-not $keep) {
-            Write-Host "No CREATE/ALTER TABLE detected."
-            Remove-Item $env:CHANGED_SQL_LIST -ErrorAction SilentlyContinue
+            Write-Host "::notice title=No table DDL in changed SQL::Skipping backup/deploy."
+            Remove-Item $env:GITHUB_WORKSPACE\deploy\_changed_sql.txt -ErrorAction SilentlyContinue
             exit 0
           }
-          $keep | Sort-Object | Set-Content -LiteralPath $env:CHANGED_SQL_LIST -Encoding UTF8
-          Write-Host "Filtered list:"
-          Get-Content $env:CHANGED_SQL_LIST | % { " - $_" }
+          $keep | Sort-Object | Set-Content -LiteralPath $env:GITHUB_WORKSPACE\deploy\_changed_sql.txt -Encoding UTF8
 
       - name: Generate backup script (from changed SQL) - STAGING
         if: ${{ env.CHANGED_SQL_LIST != '' }}
@@ -273,7 +300,6 @@ jobs:
           W: ${{ secrets.STG_DB_PASSWORD }}
         run: |
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
-
           rem Prioritas: kalau ada daftar _changed_sql.txt, pakai itu.
           if exist deploy\_changed_sql.txt (
             for /f "usebackq delims=" %%F in (`type deploy\_changed_sql.txt`) do (
