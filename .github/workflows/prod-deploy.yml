@@ -21,6 +21,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install SQLFluff
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install sqlfluff
+          sqlfluff version
+      
+      - name: Lint SQL scripts with SQLFluff
+        shell: bash
+        run: |
+          echo "Running SQLFluff lint..."
+          sqlfluff lint deploy --dialect tsql --format github-annotation-native --nocolor
+
+      - name: Auto-fix SQL formatting (optional)
+        if: always()
+        shell: bash
+        run: |
+          echo "Auto-formatting SQL scripts..."
+          sqlfluff fix deploy --dialect tsql --force
+
       - name: Prepare logs folder
         shell: powershell
         run: |
@@ -98,36 +118,130 @@ jobs:
         run: |
           set "PORT=%PROD_DB_PORT%" & if "%PORT%"=="" set "PORT=1433"
           "%SQLCMD_EXE%" -S %PROD_DB_HOST%,%PORT% -d %PROD_DB_NAME% -U %PROD_DB_USER% -P %PROD_DB_PASSWORD% -l 10 -b -C -Q "SELECT 1"
+       
+          
+      # 1) Hitung file deploy/*.sql yang berubah di push ke main
+      - name: Compute changed SQL (PUSH main)
+        if: ${{ github.event_name == 'push' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git fetch --prune --unshallow 2>$null; git fetch --all --tags 2>$null
+          $base = "${{ github.event.before }}"
+          if ([string]::IsNullOrWhiteSpace($base) -or $base -match '^0+$') { $base = 'HEAD~1' }
+          $changed = git diff --name-only --diff-filter=AMR $base HEAD -- "deploy/*.sql"
+          if (-not $changed) { Write-Host "No changed deploy SQL in this push."; exit 0 }
+          $listFile = Join-Path $env:GITHUB_WORKSPACE 'deploy\_changed_sql.txt'
+          $changed | Sort-Object | Set-Content -LiteralPath $listFile -Encoding UTF8
+          "CHANGED_SQL_LIST=$listFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          Write-Host "Changed SQL:"; Get-Content $listFile | % { " - $_" }
 
-      - name: Deploy to PRODUCTION (deploy/*.sql sorted)
+      # 2) (Opsional) hanya CREATE/ALTER TABLE
+      - name: Filter to CREATE/ALTER TABLE (PUSH)
+        if: ${{ env.CHANGED_SQL_LIST != '' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $list = Get-Content $env:CHANGED_SQL_LIST
+          if (-not $list) { exit 0 }
+          $rx = [regex]'(?is)\b(?:create|alter)\s+table\b'
+          $keep = @()
+          foreach ($f in $list) {
+            if (Test-Path $f) {
+              $t = Get-Content $f -Raw
+              if ($rx.IsMatch($t)) { $keep += $f }
+            }
+          }
+          if (-not $keep) {
+            Write-Host "No CREATE/ALTER TABLE detected."
+            Remove-Item $env:CHANGED_SQL_LIST -ErrorAction SilentlyContinue
+            exit 0
+          }
+          $keep | Sort-Object | Set-Content -LiteralPath $env:CHANGED_SQL_LIST -Encoding UTF8
+          Write-Host "Filtered list:"; Get-Content $env:CHANGED_SQL_LIST | % { " - $_" }
+
+      # 3) Generate backup script dari tabel yang tersentuh file berubah
+      - name: Generate backup script (from changed SQL) - PROD
+        if: ${{ env.CHANGED_SQL_LIST != '' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ts = Get-Date -Format yyyyMMddHHmmss
+          $suffix = "__bak_$ts"
+          "BACKUP_SUFFIX=$suffix" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+
+          $files = Get-Content $env:CHANGED_SQL_LIST
+          $rx = [regex]'(?is)create\s+table\s+(?:\[?(?<schema>\w+)\]?\.)?\[?(?<table>\w+)\]?'
+          $pairs = @()
+          foreach ($f in $files) {
+            if (Test-Path $f) {
+              $content = Get-Content $f -Raw
+              foreach ($m in $rx.Matches($content)) {
+                $schema = if ($m.Groups['schema'].Success) { $m.Groups['schema'].Value } else { 'dbo' }
+                $table  = $m.Groups['table'].Value
+                if ($table) { $pairs += [PSCustomObject]@{ Schema=$schema; Table=$table } }
+              }
+            }
+          }
+          $pairs = $pairs | Sort-Object Schema,Table -Unique
+          if (-not $pairs) { Write-Host 'No CREATE TABLE found in changed SQL'; exit 0 }
+
+          $out = Join-Path $env:GITHUB_WORKSPACE ("deploy\__auto_backup_$ts.sql")
+          $sb = New-Object System.Text.StringBuilder
+          $null = $sb.AppendLine('-- auto-generated backup script (PROD)')
+          foreach ($p in $pairs) {
+            $qn = '['+$p.Schema+'].['+$p.Table+']'
+            $bk = '['+$p.Schema+'].['+$p.Table+$suffix+']'
+            $null = $sb.AppendLine("IF OBJECT_ID(N'$qn','U') IS NOT NULL")
+            $null = $sb.AppendLine("BEGIN")
+            $null = $sb.AppendLine("  IF OBJECT_ID(N'$bk','U') IS NULL")
+            $null = $sb.AppendLine("  BEGIN")
+            $null = $sb.AppendLine("    SELECT * INTO $bk FROM $qn WITH (HOLDLOCK, TABLOCKX);")
+            $null = $sb.AppendLine("  END")
+            $null = $sb.AppendLine("END")
+            $null = $sb.AppendLine("GO")
+          }
+          $sb.ToString() | Set-Content -LiteralPath $out -Encoding UTF8
+          "BACKUP_SQL=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          Write-Host "Backup script: $out"
+
+      # 4) Jalankan backup (PROD)
+      - name: Run backup script (PROD)
+        if: ${{ env.BACKUP_SQL != '' }}
         env:
           PROD_DB_HOST: ${{ secrets.PROD_DB_HOST }}
           PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
           PROD_DB_NAME: ${{ secrets.PROD_DB_NAME }}
           PROD_DB_USER: ${{ secrets.PROD_DB_USER }}
           PROD_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
-          LOGDIR: ${{ env.LOGDIR }}
         run: |
-          setlocal enabledelayedexpansion
-          if "%LOGDIR%"=="" set "LOGDIR=%CD%\deploy_logs_prod"
-          if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+          set "PORT=%PROD_DB_PORT%" & if "%PORT%"=="" set "PORT=1433"
+          echo Running backup: %BACKUP_SQL%
+          "%SQLCMD_EXE%" -S %PROD_DB_HOST%,%PORT% -d %PROD_DB_NAME% -U %PROD_DB_USER% -P %PROD_DB_PASSWORD% -b -C -i "%BACKUP_SQL%"
+    
+
+      - name: Deploy to PRODUCTION (changed SQL only)
+        env:
+          PROD_DB_HOST: ${{ secrets.PROD_DB_HOST }}
+          PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
+          PROD_DB_NAME: ${{ secrets.PROD_DB_NAME }}
+          PROD_DB_USER: ${{ secrets.PROD_DB_USER }}
+          PROD_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
+        run: |
           set "PORT=%PROD_DB_PORT%" & if "%PORT%"=="" set "PORT=1433"
 
-          if not exist deploy\*.sql (
-            echo No SQL files in deploy\ .
-            exit /b 0
+          if exist deploy\_changed_sql.txt (
+            for /f "usebackq delims=" %%F in (`type deploy\_changed_sql.txt`) do (
+              if exist "%%F" (
+                echo Executing %%~nxF ...
+                "%SQLCMD_EXE%" -S %PROD_DB_HOST%,%PORT% -d %PROD_DB_NAME% -U %PROD_DB_USER% -P %PROD_DB_PASSWORD% -b -C -i "%%F"
+                if errorlevel 1 exit /b 1
+              )
+            )
+          ) else (
+            echo No changed SQL list. Skipping deploy.
           )
 
-          for /f "delims=" %%F in ('dir /b /o:n deploy\*.sql') do (
-            set "OUTLOG=%LOGDIR%\%%~nF.out.txt"
-            echo Executing %%F ... > "!OUTLOG!"
-            "%SQLCMD_EXE%" -S %PROD_DB_HOST%,%PORT% -d %PROD_DB_NAME% -U %PROD_DB_USER% -P %PROD_DB_PASSWORD% -b -C -i "deploy\%%F" -o "!OUTLOG!"
-            if errorlevel 1 (
-              echo FAILED on %%F
-              exit /b 1
-            )
-          )
-          echo PRODUCTION deploy done.
 
       - name: Upload deploy logs
         if: ${{ always() }}
