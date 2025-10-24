@@ -148,15 +148,18 @@ jobs:
           if "%PORT%"=="" set "PORT=1433"
           "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
 
-      - name: Compute changed SQL (robust)
+      - name: Compute changed SQL (robust + safe)
         id: changes
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           Set-Location "$env:GITHUB_WORKSPACE"
+
+          # Non-interaktif & repo aman di self-hosted
+          $env:GIT_TERMINAL_PROMPT = '0'
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
 
-          # Fetch all refs
+          # 1) Fetch refs secara penuh (argumen dipisah → aman di PowerShell)
           try {
             git fetch --all --tags --prune 2>$null
           } catch {
@@ -164,50 +167,71 @@ jobs:
             try { git fetch origin --prune 2>$null } catch { Write-Host "::warning title=git fetch still failed::Using local range only." }
           }
 
+          # 2) Tentukan konteks
           $eventName = '${{ github.event_name }}'
           $beforeSha = '${{ github.event.before }}'
-          $baseRef   = '${{ github.base_ref }}'
+          $baseRef   = '${{ github.base_ref }}'   # hanya ada saat PR
 
+          # 3) Bangun range diff
+          $range = $null
           if ($eventName -eq 'pull_request' -and $baseRef) {
-            Write-Host "🔄 Fetching base branch origin/$baseRef ..."
-            try {
-              git fetch origin "$($baseRef):$($baseRef)" --depth=1 2>$null
-            } catch {
-              Write-Host "::warning title=Fetch base_ref failed::Will fallback to local HEAD~1"
-            }
-            if ((git rev-parse --verify $baseRef 2>$null) -and $LASTEXITCODE -eq 0) {
-              $range = "$baseRef...HEAD"
+            # Pastikan remote base tersedia lokal sebagai 'origin/<baseRef>'
+            Write-Host ("🔄 Fetching origin/{0} ..." -f $baseRef)
+            try { git fetch origin $baseRef --depth=50 2>$null } catch { Write-Host "::warning title=Fetch base_ref failed::May fallback later." }
+
+            $baseRemote = "origin/$baseRef"
+            $baseExists = (git rev-parse --verify $baseRemote 2>$null) -and ($LASTEXITCODE -eq 0)
+            if ($baseExists) {
+              $baseSha = (git rev-parse $baseRemote).Trim()
+              Write-Host ("base_ref     : {0}  ({1})" -f $baseRemote, $baseSha)
+              $range = "$baseRemote...HEAD"
             } else {
+              Write-Host "::notice title=Base ref not found locally::Will use fallback HEAD~1...HEAD"
               $range = 'HEAD~1...HEAD'
             }
           }
           else {
+            # Push: gunakan before...HEAD; fallback jika before invalid
             if ([string]::IsNullOrWhiteSpace($beforeSha) -or $beforeSha -match '^0+$') {
+              Write-Host "::notice title=before SHA invalid/empty::Using fallback HEAD~1...HEAD"
               $range = 'HEAD~1...HEAD'
             } else {
               $range = "$beforeSha...HEAD"
             }
           }
 
-          $changed = git diff --name-only --diff-filter=AMR $range -- "deploy/*.sql"
+          Write-Host ("=== Diff range: {0} ===" -f $range)
+
+          # 4) Ambil file deploy/*.sql yang Added/Modified/Renamed
+          $changed = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/*.sql"
+
+          # Jika Git gagal (contoh: 'no merge base'), fallback sekali lagi
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning title=No merge base found::Falling back to HEAD~1...HEAD"
+            $range   = 'HEAD~1...HEAD'
+            $changed = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/*.sql"
+          }
+
           $hasChanges = if ($changed) { 'true' } else { 'false' }
 
           if ($hasChanges -eq 'true') {
             $listFile = Join-Path $env:GITHUB_WORKSPACE 'deploy\_changed_sql.txt'
             $changed | Sort-Object | Set-Content -LiteralPath $listFile -Encoding UTF8
+
+            # Export untuk step berikutnya (ENV & OUTPUTS)
             "CHANGED_SQL_LIST=$listFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-            Write-Host "Changed SQL (range $range):"
+            "has_changes=true"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "changed_list=deploy\_changed_sql.txt" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+            Write-Host "=== Changed SQL files (range $range) ==="
             Get-Content $listFile | ForEach-Object { " - $_" }
-          } else {
+          }
+          else {
             Write-Host "No changed deploy SQL in range: $range"
             Write-Host "::notice title=No changed SQL::Skipping backup/deploy steps."
+            "has_changes=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            exit 0  # ✅ tidak dianggap error
           }
-
-          "has_changes=$hasChanges" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          if ($hasChanges -eq 'true') {
-            "changed_list=deploy\_changed_sql.txt" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          }
-
 
       
       - name: Filter to CREATE/ALTER TABLE (PR)
