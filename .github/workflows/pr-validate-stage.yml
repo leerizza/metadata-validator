@@ -239,7 +239,7 @@ jobs:
         shell: powershell
         run: |
           $list = Get-Content $env:GITHUB_WORKSPACE\deploy\_changed_sql.txt
-          $rx = [regex]'(?is)\b(?:create|alter)\s+table\b'
+          $rx = $rx = [regex]'(?is)\b(?:create\s+table|alter\s+table|alter\s+column|sp_rename)\b'
           $keep = @()
           foreach ($f in $list) { if (Test-Path $f) { $t = Get-Content $f -Raw; if ($rx.IsMatch($t)) { $keep += $f } } }
           if (-not $keep) {

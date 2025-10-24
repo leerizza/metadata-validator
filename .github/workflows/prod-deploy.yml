@@ -181,7 +181,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $list = Get-Content $env:CHANGED_SQL_LIST
           if (-not $list) { exit 0 }
-          $rx = [regex]'(?is)\b(?:create|alter)\s+table\b'
+          $rx = [regex]'(?is)\b(?:create\s+table|alter\s+table|alter\s+column|sp_rename)\b'
           $keep = @()
           foreach ($f in $list) {
             if (Test-Path $f) {
