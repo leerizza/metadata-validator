@@ -136,20 +136,62 @@ jobs:
        
           
       # 1) Hitung file deploy/*.sql yang berubah di push ke main
-      - name: Compute changed SQL (PUSH main)
-        if: ${{ github.event_name == 'push' }}
+      - name: Compute changed SQL (robust)
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          git fetch --prune --unshallow 2>$null; git fetch --all --tags 2>$null
-          $base = "${{ github.event.before }}"
-          if ([string]::IsNullOrWhiteSpace($base) -or $base -match '^0+$') { $base = 'HEAD~1' }
-          $changed = git diff --name-only --diff-filter=AMR $base HEAD -- "deploy/*.sql"
-          if (-not $changed) { Write-Host "No changed deploy SQL in this push."; exit 0 }
+
+          # Pastikan folder kerja dianggap aman oleh Git di self-hosted Windows
+          git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
+
+          # Unshallow hanya jika benar-benar shallow
+          $isShallow = (git rev-parse --is-shallow-repository 2>$null).Trim()
+          if ($isShallow -eq 'true') {
+            git fetch --prune --unshallow 2>$null
+          } else {
+            git fetch --all --tags --prune 2>$null
+          }
+
+          # Tentukan range diff:
+          # - push: pakai SHA "before...HEAD"
+          # - jika first push (before = 0…0) fallback ke HEAD~1...HEAD
+          # - PR: bandingkan base branch dengan HEAD
+          $eventName = '${{ github.event_name }}'
+          $beforeSha = '${{ github.event.before }}'
+          $baseRef   = '${{ github.base_ref }}'  # hanya ada di PR
+
+          if ($eventName -eq 'pull_request') {
+            # PR: fetch base, lalu diff base...HEAD
+            if ($baseRef -and $baseRef -ne '') {
+              git fetch origin $baseRef --depth=1 2>$null
+              $range = "origin/$baseRef...HEAD"
+            } else {
+              $range = 'HEAD~1...HEAD'
+            }
+          } else {
+            # push:
+            if ([string]::IsNullOrWhiteSpace($beforeSha) -or $beforeSha -match '^0+$') {
+              $range = 'HEAD~1...HEAD'
+            } else {
+              $range = "$beforeSha...HEAD"
+            }
+          }
+
+          # Ambil hanya file deploy/*.sql yang ditambah/ubah/rename
+          $changed = git diff --name-only --diff-filter=AMR $range -- "deploy/*.sql"
+
+          if (-not $changed) {
+            Write-Host "No changed deploy SQL in range: $range"
+            exit 0
+          }
+
           $listFile = Join-Path $env:GITHUB_WORKSPACE 'deploy\_changed_sql.txt'
           $changed | Sort-Object | Set-Content -LiteralPath $listFile -Encoding UTF8
           "CHANGED_SQL_LIST=$listFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-          Write-Host "Changed SQL:"; Get-Content $listFile | % { " - $_" }
+
+          Write-Host "Changed SQL files (range $range):"
+          Get-Content $listFile | ForEach-Object { " - $_" }
+
 
       # 2) (Opsional) hanya CREATE/ALTER TABLE
       - name: Filter to CREATE/ALTER TABLE (PUSH)
