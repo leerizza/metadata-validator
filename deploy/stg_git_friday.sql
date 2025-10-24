@@ -3,6 +3,6 @@ BEGIN
   CREATE TABLE [dbo].[stg_git_friday] (
     id INT NOT NULL PRIMARY KEY,
     nama_lengkap VARCHAR(200) NOT NULL,
-    email VARCHAR(200) NULL
+    email VARCHAR(100) NULL
   );
 END;
