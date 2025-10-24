@@ -21,25 +21,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install SQLFluff
-        shell: bash
+      - name: Resolve Python and create venv
         run: |
-          python -m pip install --upgrade pip
-          pip install sqlfluff
-          sqlfluff version
+          where python || (echo ❌ Python not found & exit /b 1)
+          for /f "delims=" %%i in ('where python') do (
+            echo %%i | findstr /i "\\WindowsApps\\" >nul && (rem skip) || (set "PYTHON_EXE=%%i" & goto :found)
+          )
+          :found
+          "%PYTHON_EXE%" -m venv .venv
+          set "VENV_PY=%CD%\.venv\Scripts\python.exe"
+          echo VENV_PY=%VENV_PY%>>%GITHUB_ENV%
+
+      - name: Install SQLFluff (Windows)
+        # defaults.run.shell sudah cmd, jadi cukup pakai cmd
+        run: |
+          if not exist "%VENV_PY%" (
+            echo VENV_PY not set, fallback to PYTHON_EXE
+            set "VENV_PY=%PYTHON_EXE%"
+          )
+          "%VENV_PY%" -m pip install --upgrade pip
+          "%VENV_PY%" -m pip install sqlfluff
+
       
       - name: Lint SQL scripts with SQLFluff
-        shell: bash
         run: |
-          echo "Running SQLFluff lint..."
-          sqlfluff lint deploy --dialect tsql --format github-annotation-native --nocolor
+          if not exist "%VENV_PY%" set "VENV_PY=%PYTHON_EXE%"
+          rem Dialect SQL Server
+          "%VENV_PY%" -m sqlfluff lint deploy --dialect tsql --format github-annotation-native --nocolor
 
+      
       - name: Auto-fix SQL formatting (optional)
         if: always()
-        shell: bash
         run: |
-          echo "Auto-formatting SQL scripts..."
-          sqlfluff fix deploy --dialect tsql --force
+          if not exist "%VENV_PY%" set "VENV_PY=%PYTHON_EXE%"
+          "%VENV_PY%" -m sqlfluff fix deploy --dialect tsql --force
 
       - name: Prepare logs folder
         shell: powershell
