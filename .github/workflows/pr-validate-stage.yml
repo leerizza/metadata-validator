@@ -153,16 +153,45 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
-          git fetch --all --tags --prune 2>$null
+          Set-Location "$env:GITHUB_WORKSPACE"
 
+          # Mark repo as safe untuk self-hosted
+          git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
+
+          # --- FETCH yang tidak bikin PS "meledak" ---
+          function Invoke-GitFetch {
+            param([string]$ArgsLine = '--all --tags --prune')
+            $output = git fetch $ArgsLine 2>&1
+            $code   = $LASTEXITCODE
+            # Tulis output supaya terlihat di log
+            if ($output) { $output | ForEach-Object { Write-Host $_ } }
+            return @{ Code = $code; Output = $output -join "`n" }
+          }
+
+          # Coba fetch penuh; kalau gagal, coba fetch origin saja; terakhir: skip fetch dan lanjut
+          $res = Invoke-GitFetch '--all --tags --prune'
+          if ($res.Code -ne 0) {
+            Write-Host "::warning title=git fetch failed::Retrying with 'origin --prune'"
+            $res = Invoke-GitFetch 'origin --prune'
+            if ($res.Code -ne 0) {
+              Write-Host "::warning title=git fetch still failed::Will continue without fetch. Using local range only."
+            }
+          }
+
+          # Tentukan range diff
           $eventName = '${{ github.event_name }}'
           $beforeSha = '${{ github.event.before }}'
           $baseRef   = '${{ github.base_ref }}'
 
           if ($eventName -eq 'pull_request' -and $baseRef) {
-            git fetch origin $baseRef --depth=1 2>$null
-            $range = "origin/$baseRef...HEAD"
+            # Try fetch base (best effort)
+            $resBase = Invoke-GitFetch "origin $baseRef --depth=1"
+            if ($resBase.Code -eq 0) {
+              $range = "origin/$baseRef...HEAD"
+            } else {
+              Write-Host "::notice title=Unable to fetch base_ref::Using local range HEAD~1...HEAD"
+              $range = 'HEAD~1...HEAD'
+            }
           } else {
             if ([string]::IsNullOrWhiteSpace($beforeSha) -or $beforeSha -match '^0+$') {
               $range = 'HEAD~1...HEAD'
@@ -171,6 +200,7 @@ jobs:
             }
           }
 
+          # Ambil hanya deploy/*.sql yang Added/Modified/Renamed
           $changed = git diff --name-only --diff-filter=AMR $range -- "deploy/*.sql"
           $hasChanges = if ($changed) { 'true' } else { 'false' }
 
@@ -178,13 +208,14 @@ jobs:
             $listFile = Join-Path $env:GITHUB_WORKSPACE 'deploy\_changed_sql.txt'
             $changed | Sort-Object | Set-Content -LiteralPath $listFile -Encoding UTF8
             "CHANGED_SQL_LIST=$listFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-            Write-Host "Changed SQL files (range $range):"
-            Get-Content $listFile | % { " - $_" }
+            Write-Host "Changed deploy SQL (range $range):"
+            Get-Content $listFile | ForEach-Object { " - $_" }
           } else {
             Write-Host "No changed deploy SQL in range: $range"
-            Write-Host "::notice title=No changed SQL::Skipping backup and deploy."
+            Write-Host "::notice title=No changed SQL::Skipping backup/deploy steps."
           }
 
+          # Outputs untuk step berikutnya
           "has_changes=$hasChanges" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       
