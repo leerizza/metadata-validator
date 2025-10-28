@@ -26,11 +26,13 @@ jobs:
       drop_list:      ${{ steps.chg_drop.outputs.changed_list }}
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
 
       - name: Resolve sqlcmd
         shell: powershell
-        env: { VAR_SQLCMD: ${{ vars.SQLCMD_EXE }} }
+        env:
+          VAR_SQLCMD: ${{ vars.SQLCMD_EXE }}
         run: |
           $ErrorActionPreference='Stop'
           function Exists($p){ if([string]::IsNullOrWhiteSpace($p)){return $false}; Test-Path $p }
@@ -69,7 +71,6 @@ jobs:
           echo Target: %H%,%PORT% / DB=%D%
           "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
 
-      # =============== HITUNG PERUBAHAN ===============
       - name: Compute CREATE changes
         id: chg_create
         shell: powershell
@@ -168,9 +169,11 @@ jobs:
     environment: staging
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
-        with: { name: changed-sql-lists }
+        with:
+          name: changed-sql-lists
       - name: Resolve & check sqlcmd
         run: |
           echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
@@ -178,7 +181,6 @@ jobs:
           "%SQLCMD_EXE%" -? >NUL || (echo sqlcmd not executable & exit /b 1)
       - name: Show changed list (CREATE)
         run: |
-          dir /b
           if not exist "deploy\_changed_create.txt" ( echo Missing deploy\_changed_create.txt & exit /b 1 )
           type deploy\_changed_create.txt
       - name: Deploy CREATE (changed only)
@@ -206,9 +208,11 @@ jobs:
     environment: staging
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
-        with: { name: changed-sql-lists }
+        with:
+          name: changed-sql-lists
       - name: Resolve & check sqlcmd
         run: |
           echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
@@ -243,9 +247,11 @@ jobs:
     environment: staging
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
-        with: { name: changed-sql-lists }
+        with:
+          name: changed-sql-lists
       - name: Resolve & check sqlcmd
         run: |
           echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
