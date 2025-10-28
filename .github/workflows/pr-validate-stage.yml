@@ -19,8 +19,11 @@ jobs:
     runs-on: [self-hosted, Windows]
     outputs:
       create_changed: ${{ steps.chg_create.outputs.has_changes }}
+      create_list:    ${{ steps.chg_create.outputs.changed_list }}
       alter_changed:  ${{ steps.chg_alter.outputs.has_changes }}
+      alter_list:     ${{ steps.chg_alter.outputs.changed_list }}
       drop_changed:   ${{ steps.chg_drop.outputs.has_changes }}
+      drop_list:      ${{ steps.chg_drop.outputs.changed_list }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -50,7 +53,7 @@ jobs:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
         run: |
-          nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
+          nslookup %H% || (echo DNS FAILED & exit /b 1)
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
           powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]'%PORT%') -InformationLevel Quiet)){exit 1}"
 
@@ -63,9 +66,10 @@ jobs:
           W: ${{ secrets.STG_DB_PASSWORD }}
         run: |
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          echo Target: %H%,%PORT% / DB=%D%
           "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
 
-      # ======== HITUNG PERUBAHAN (range PR yang benar) ========
+      # =============== HITUNG PERUBAHAN ===============
       - name: Compute CREATE changes
         id: chg_create
         shell: powershell
@@ -79,17 +83,20 @@ jobs:
             $range="origin/$base...HEAD"
           } else {
             $before='${{ github.event.before }}'
-            $range = ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') ? 'HEAD~1...HEAD' : "$before...HEAD"
+            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { $range='HEAD~1...HEAD' } else { $range="$before...HEAD" }
           }
+          Write-Host "Diff range (CREATE): $range"
           $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/create/*.sql"
           $wt   = git ls-files -mo --exclude-standard -- "deploy/create/*.sql"
           $all  = @(); if($diff){$all+=$diff}; if($wt){$all+=$wt}; $all=$all|Sort-Object -Unique
           if($all.Count -gt 0){
             $p='deploy\_changed_create.txt';$all|Set-Content $p -Enc UTF8
-            "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
+            "has_changes=true"  | Out-File $env:GITHUB_OUTPUT -Append
+            "changed_list=$p"   | Out-File $env:GITHUB_OUTPUT -Append
             Write-Host "CREATE changed:"; Get-Content $p | % { ' - ' + $_ }
           } else {
             "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
+            "changed_list="     | Out-File $env:GITHUB_OUTPUT -Append
             Write-Host "No CREATE changes (range $range)"
           }
 
@@ -101,17 +108,20 @@ jobs:
           $base='${{ github.base_ref }}'
           if ($base) { $range="origin/$base...HEAD" } else {
             $before='${{ github.event.before }}'
-            $range = ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') ? 'HEAD~1...HEAD' : "$before...HEAD"
+            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { $range='HEAD~1...HEAD' } else { $range="$before...HEAD" }
           }
+          Write-Host "Diff range (ALTER): $range"
           $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/alter/*.sql"
           $wt   = git ls-files -mo --exclude-standard -- "deploy/alter/*.sql"
           $all  = @(); if($diff){$all+=$diff}; if($wt){$all+=$wt}; $all=$all|Sort-Object -Unique
           if($all.Count -gt 0){
             $p='deploy\_changed_alter.txt';$all|Set-Content $p -Enc UTF8
-            "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
+            "has_changes=true"  | Out-File $env:GITHUB_OUTPUT -Append
+            "changed_list=$p"   | Out-File $env:GITHUB_OUTPUT -Append
             Write-Host "ALTER changed:"; Get-Content $p | % { ' - ' + $_ }
           } else {
             "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
+            "changed_list="     | Out-File $env:GITHUB_OUTPUT -Append
             Write-Host "No ALTER changes (range $range)"
           }
 
@@ -123,17 +133,20 @@ jobs:
           $base='${{ github.base_ref }}'
           if ($base) { $range="origin/$base...HEAD" } else {
             $before='${{ github.event.before }}'
-            $range = ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') ? 'HEAD~1...HEAD' : "$before...HEAD"
+            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { $range='HEAD~1...HEAD' } else { $range="$before...HEAD" }
           }
+          Write-Host "Diff range (DROP): $range"
           $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/drop/*.sql"
           $wt   = git ls-files -mo --exclude-standard -- "deploy/drop/*.sql"
           $all  = @(); if($diff){$all+=$diff}; if($wt){$all+=$wt}; $all=$all|Sort-Object -Unique
           if($all.Count -gt 0){
             $p='deploy\_changed_drop.txt';$all|Set-Content $p -Enc UTF8
-            "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
+            "has_changes=true"  | Out-File $env:GITHUB_OUTPUT -Append
+            "changed_list=$p"   | Out-File $env:GITHUB_OUTPUT -Append
             Write-Host "DROP changed:"; Get-Content $p | % { ' - ' + $_ }
           } else {
             "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
+            "changed_list="     | Out-File $env:GITHUB_OUTPUT -Append
             Write-Host "No DROP changes (range $range)"
           }
 
@@ -158,10 +171,16 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/download-artifact@v4
         with: { name: changed-sql-lists }
-      - name: Resolve sqlcmd
+      - name: Resolve & check sqlcmd
         run: |
           echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
-          if not exist "%SQLCMD_EXE%" ( echo ❌ sqlcmd missing & exit /b 1 )
+          if not exist "%SQLCMD_EXE%" ( echo sqlcmd missing & exit /b 1 )
+          "%SQLCMD_EXE%" -? >NUL || (echo sqlcmd not executable & exit /b 1)
+      - name: Show changed list (CREATE)
+        run: |
+          dir /b
+          if not exist "deploy\_changed_create.txt" ( echo Missing deploy\_changed_create.txt & exit /b 1 )
+          type deploy\_changed_create.txt
       - name: Deploy CREATE (changed only)
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -170,14 +189,13 @@ jobs:
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
         run: |
-          if not exist "deploy\_changed_create.txt" ( echo ⚠️ No changed CREATE list & exit /b 0 )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
           for /f "usebackq delims=" %%F in (`type deploy\_changed_create.txt`) do (
             if exist "%%F" (
               echo CREATE -> %%~nxF
               "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
             ) else (
-              echo ⚠️ File not found: %%F
+              echo File not found: %%F & exit /b 1
             )
           )
 
@@ -191,10 +209,15 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/download-artifact@v4
         with: { name: changed-sql-lists }
-      - name: Resolve sqlcmd
+      - name: Resolve & check sqlcmd
         run: |
           echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
-          if not exist "%SQLCMD_EXE%" ( echo ❌ sqlcmd missing & exit /b 1 )
+          if not exist "%SQLCMD_EXE%" ( echo sqlcmd missing & exit /b 1 )
+          "%SQLCMD_EXE%" -? >NUL || (echo sqlcmd not executable & exit /b 1)
+      - name: Show changed list (ALTER)
+        run: |
+          if not exist "deploy\_changed_alter.txt" ( echo Missing deploy\_changed_alter.txt & exit /b 1 )
+          type deploy\_changed_alter.txt
       - name: Deploy ALTER (changed only)
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -203,14 +226,13 @@ jobs:
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
         run: |
-          if not exist "deploy\_changed_alter.txt" ( echo ⚠️ No changed ALTER list & exit /b 0 )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
           for /f "usebackq delims=" %%F in (`type deploy\_changed_alter.txt`) do (
             if exist "%%F" (
               echo ALTER -> %%~nxF
               "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
             ) else (
-              echo ⚠️ File not found: %%F
+              echo File not found: %%F & exit /b 1
             )
           )
 
@@ -224,10 +246,11 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/download-artifact@v4
         with: { name: changed-sql-lists }
-      - name: Resolve sqlcmd
+      - name: Resolve & check sqlcmd
         run: |
           echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
-          if not exist "%SQLCMD_EXE%" ( echo ❌ sqlcmd missing & exit /b 1 )
+          if not exist "%SQLCMD_EXE%" ( echo sqlcmd missing & exit /b 1 )
+          "%SQLCMD_EXE%" -? >NUL || (echo sqlcmd not executable & exit /b 1)
       - name: Guard allowlist DROP
         shell: powershell
         run: |
@@ -243,6 +266,10 @@ jobs:
               if($allow -notcontains $full){Write-Error "DROP not in allowlist: $full (file $f)"}
             }
           }
+      - name: Show changed list (DROP)
+        run: |
+          if not exist "deploy\_changed_drop.txt" ( echo Missing deploy\_changed_drop.txt & exit /b 1 )
+          type deploy\_changed_drop.txt
       - name: Deploy DROP (changed only)
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -251,13 +278,12 @@ jobs:
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
         run: |
-          if not exist "deploy\_changed_drop.txt" ( echo ⚠️ No changed DROP list & exit /b 0 )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
           for /f "usebackq delims=" %%F in (`type deploy\_changed_drop.txt`) do (
             if exist "%%F" (
               echo DROP -> %%~nxF
               "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
             ) else (
-              echo ⚠️ File not found: %%F
+              echo File not found: %%F & exit /b 1
             )
           )
