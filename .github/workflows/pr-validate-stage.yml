@@ -1,7 +1,8 @@
-name: Validate & Deploy to STAGING (Modular)
+name: Validate & Deploy to STAGING (PR only, modular)
 
 on:
   pull_request:
+    branches: [master]           # ganti ke main jika perlu
     paths:
       - "deploy/**/*.sql"
       - "tables/**/*.yml"
@@ -14,8 +15,12 @@ defaults:
   run:
     shell: cmd
 
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
 jobs:
-  # --- COMMON: checkout & preflight DB ---
   setup:
     runs-on: [self-hosted, Windows]
     outputs:
@@ -23,8 +28,6 @@ jobs:
       create_list:    ${{ steps.chg_create.outputs.changed_list }}
       alter_changed:  ${{ steps.chg_alter.outputs.has_changes }}
       alter_list:     ${{ steps.chg_alter.outputs.changed_list }}
-      drop_changed:   ${{ steps.chg_drop.outputs.has_changes }}
-      drop_list:      ${{ steps.chg_drop.outputs.changed_list }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -57,11 +60,25 @@ jobs:
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
           "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
 
-      # --- (opsional) Generate SQL dari metadata ---
-      # - name: Generate SQL from metadata
-      #   run: python scripts\metadata_validate_and_render.py tables deploy
+      # Guard tipe data dasar
+      - name: Block disallowed types (no MAX, no legacy LOB)
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $f=Get-ChildItem -Path 'deploy' -Filter '*.sql' -Recurse -EA SilentlyContinue
+          if(-not $f){ Write-Host 'No SQL files.'; exit 0 }
+          $patMax='\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)'; $patLegacy='\b(?:text|ntext|image)\b'
+          $bad=Select-String -Path $f.FullName -Pattern $patMax
+          $legacy=Select-String -Path $f.FullName -Pattern $patLegacy
+          if(($bad|Measure-Object).Count -gt 0 -or ($legacy|Measure-Object).Count -gt 0){
+            Write-Host 'Found disallowed type(s):'
+            if($bad){ ($bad.Path|Sort-Object -Unique) | % {" - $_"} }
+            if($legacy){ ($legacy.Path|Sort-Object -Unique) | % {" - $_"} }
+            exit 1
+          }
+          Write-Host 'SQL type validation passed.'
 
-      # --- Hitung perubahan per kategori ---
+      # Hitung perubahan per kategori
       - name: Compute changes (CREATE)
         id: chg_create
         shell: powershell
@@ -93,21 +110,7 @@ jobs:
           $all  = @(); if($diff){$all+=$diff}; if($wt){$all+=$wt}; $all=$all|Sort-Object -Unique
           if($all.Count -gt 0){ $p='deploy\_changed_alter.txt'; $all|Set-Content $p -Enc UTF8; "has_changes=true" |Out-File $env:GITHUB_OUTPUT -Append; "changed_list=$p"|Out-File $env:GITHUB_OUTPUT -Append } else { "has_changes=false"|Out-File $env:GITHUB_OUTPUT -Append }
 
-      - name: Compute changes (DROP)
-        id: chg_drop
-        shell: powershell
-        run: |
-          $ErrorActionPreference='Stop'
-          $isPR = '${{ github.event_name }}' -eq 'pull_request'
-          $base = '${{ github.base_ref }}'
-          $before='${{ github.event.before }}'
-          if ($isPR -and $base) { $range="origin/$base...HEAD" } else { $range = ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') ? 'HEAD~1...HEAD' : "$before...HEAD" }
-          $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/drop/*.sql"
-          $wt   = git ls-files -mo --exclude-standard -- "deploy/drop/*.sql"
-          $all  = @(); if($diff){$all+=$diff}; if($wt){$all+=$wt}; $all=$all|Sort-Object -Unique
-          if($all.Count -gt 0){ $p='deploy\_changed_drop.txt'; $all|Set-Content $p -Enc UTF8; "has_changes=true" |Out-File $env:GITHUB_OUTPUT -Append; "changed_list=$p"|Out-File $env:GITHUB_OUTPUT -Append } else { "has_changes=false"|Out-File $env:GITHUB_OUTPUT -Append }
-
-  # --- CREATE → STAGING ---
+  # CREATE → STAGING
   deploy_create_stg:
     needs: setup
     if: needs.setup.outputs.create_changed == 'true'
@@ -133,7 +136,7 @@ jobs:
             )
           )
 
-  # --- ALTER → STAGING (backup otomatis) ---
+  # ALTER → STAGING (backup otomatis)
   deploy_alter_stg:
     needs: [setup, deploy_create_stg]
     if: needs.setup.outputs.alter_changed == 'true'
@@ -173,8 +176,7 @@ jobs:
             $schema,$table=$qn.Split('.')
             $bk="[$schema].[$table"+"__bak_$ts]"
             $qn2="[$schema].[$table]"
-            [void]$sb.AppendLine("IF OBJECT_ID(N'$qn2','U') IS NOT NULL AND OBJECT_ID(N'$bk','U') IS NULL")
-            [void]$sb.AppendLine("BEGIN SELECT * INTO $bk FROM $qn2 WITH (HOLDLOCK, TABLOCKX); END")
+            [void]$sb.AppendLine("IF OBJECT_ID(N'$qn2','U') IS NOT NULL AND OBJECT_ID(N'$bk','U') IS NULL BEGIN SELECT * INTO $bk FROM $qn2 WITH (HOLDLOCK, TABLOCKX); END")
             [void]$sb.AppendLine("GO")
           }
           $sb.ToString() | Set-Content -Path $out -Encoding UTF8
@@ -194,49 +196,6 @@ jobs:
           for /f "usebackq delims=" %%F in (`type deploy\_changed_alter.txt`) do (
             if exist "%%F" (
               echo ALTER -> %%~nxF
-              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
-            )
-          )
-
-  # --- DROP → STAGING (allowlist + backup) ---
-  deploy_drop_stg:
-    needs: [setup, deploy_alter_stg]
-    if: needs.setup.outputs.drop_changed == 'true'
-    runs-on: [self-hosted, Windows]
-    environment: staging
-    steps:
-      - uses: actions/checkout@v4
-      - name: Use sqlcmd
-        run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
-      - name: Guard allowlist DROP (fail if not allowed)
-        shell: powershell
-        run: |
-          $allow = Get-Content -ErrorAction SilentlyContinue '.github\drop-allowlist.txt'
-          if (-not $allow){ Write-Host "::warning No drop-allowlist.txt -> all DROP blocked"; exit 1 }
-          $rx=[regex]'(?is)\bdrop\s+table\s+(?:\[?(?<s>\w+)\]?\.)?\[?(?<t>\w+)\]?'
-          foreach($f in Get-Content 'deploy\_changed_drop.txt'){
-            $c=Get-Content $f -Raw
-            foreach($m in $rx.Matches($c)){
-              $s = $m.Groups['s'].Success ? $m.Groups['s'].Value : 'dbo'
-              $t = $m.Groups['t'].Value
-              $full="$s.$t"
-              if($allow -notcontains $full){
-                Write-Error "DROP not in allowlist: $full (file $f)"
-              }
-            }
-          }
-      - name: Deploy DROP (changed only)
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-          D: ${{ secrets.STG_DB_NAME }}
-          U: ${{ secrets.STG_DB_USER }}
-          W: ${{ secrets.STG_DB_PASSWORD }}
-        run: |
-          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
-          for /f "usebackq delims=" %%F in (`type deploy\_changed_drop.txt`) do (
-            if exist "%%F" (
-              echo DROP -> %%~nxF
               "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
             )
           )

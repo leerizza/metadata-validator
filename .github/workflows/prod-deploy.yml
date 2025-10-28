@@ -1,9 +1,11 @@
-name: Deploy to Production
+name: Deploy to Production (on PR merged)
 
 on:
-  push:
-    branches:
-      - master    # ganti jika default branch kamu bukan 'main'
+  pull_request:
+    types: [closed]
+    branches: [master]       # ganti ke main jika perlu
+    paths:
+      - "deploy/**"
 
 concurrency:
   group: prod-deploy
@@ -16,276 +18,83 @@ defaults:
 jobs:
   deploy_prod:
     name: deploy_prod
-    runs-on: [self-hosted, Windows]  # pastikan runner punya label Windows
-    environment: production          # aktifkan Required reviewers di Settings > Environments > production
+    if: ${{ github.event.pull_request.merged == true }}
+    runs-on: [self-hosted, Windows]
+    environment: production
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      # - name: Resolve Python and create venv
-      #   run: |
-      #     where python || (echo ❌ Python not found & exit /b 1)
-      #     for /f "delims=" %%i in ('where python') do (
-      #       echo %%i | findstr /i "\\WindowsApps\\" >nul && (rem skip) || (set "PYTHON_EXE=%%i" & goto :found)
-      #     )
-      #     :found
-      #     "%PYTHON_EXE%" -m venv .venv
-      #     set "VENV_PY=%CD%\.venv\Scripts\python.exe"
-      #     echo VENV_PY=%VENV_PY%>>%GITHUB_ENV%
-
-      # - name: Install SQLFluff (Windows)
-      #   # defaults.run.shell sudah cmd, jadi cukup pakai cmd
-      #   run: |
-      #     if not exist "%VENV_PY%" (
-      #       echo VENV_PY not set, fallback to PYTHON_EXE
-      #       set "VENV_PY=%PYTHON_EXE%"
-      #     )
-      #     "%VENV_PY%" -m pip install --upgrade pip
-      #     "%VENV_PY%" -m pip install sqlfluff
-
-      
-      # - name: Lint SQL scripts with SQLFluff
-      #   run: |
-      #     if not exist "%VENV_PY%" set "VENV_PY=%PYTHON_EXE%"
-      #     rem Dialect SQL Server
-      #     "%VENV_PY%" -m sqlfluff lint deploy --dialect tsql --format github-annotation-native --nocolor
-
-      
-      # - name: Auto-fix SQL formatting (optional)
-      #   if: always()
-      #   run: |
-      #     if not exist "%VENV_PY%" set "VENV_PY=%PYTHON_EXE%"
-      #     "%VENV_PY%" -m sqlfluff fix deploy --dialect tsql --force
-
-      - name: Prepare logs folder
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $env:GITHUB_WORKSPACE 'deploy_logs_prod'
-          if (!(Test-Path $root)) {
-            New-Item -ItemType Directory -Path $root -Force | Out-Null
-          }
-          "LOGDIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+        with: { fetch-depth: 0 }
 
       - name: Resolve sqlcmd
         shell: powershell
-        env:
-          VAR_SQLCMD: ${{ vars.SQLCMD_EXE }}   # optional: set di repo Variables
+        env: { VAR_SQLCMD: ${{ vars.SQLCMD_EXE }} }
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference='Stop'
           function Exists($p){ if([string]::IsNullOrWhiteSpace($p)){return $false}; Test-Path $p }
-          $candidates = @()
-          if ($env:VAR_SQLCMD) { $candidates += $env:VAR_SQLCMD }
-
-          try {
-            $found = & where.exe sqlcmd 2>$null
-            if ($LASTEXITCODE -eq 0) {
-              $candidates += ($found -split "`r?`n" | Where-Object { $_ -and (Test-Path $_) })
-            }
-          } catch {}
-
-          $candidates += @(
-            "C:\Program Files\SqlCmd\sqlcmd.exe",
-            "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe",
-            "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe",
-            "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe",
-            "C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe"
-          )
-
-          $pick = $candidates | Where-Object { Exists $_ } | Select-Object -First 1
-          if (-not $pick) { throw "sqlcmd.exe not found. Set repo variable SQLCMD_EXE or install SQL tools." }
-
+          $c=@()
+          if($env:VAR_SQLCMD){ $c+=$env:VAR_SQLCMD }
+          try{$found=& where.exe sqlcmd 2>$null; if($LASTEXITCODE -eq 0){ $c+=($found -split "`r?`n" | ? { $_ -and (Test-Path $_) }) }}catch{}
+          $c+@("C:\Program Files\SqlCmd\sqlcmd.exe",
+               "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe")
+          $pick=$c|?{Exists $_}|Select-Object -First 1
+          if(-not $pick){ throw "sqlcmd.exe not found. Set repo variable SQLCMD_EXE or install SQL tools." }
           "SQLCMD_EXE=$pick" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
           Write-Host "Using sqlcmd: $pick"
 
-      - name: Echo target
-        env:
-          PROD_DB_HOST: ${{ secrets.PROD_DB_HOST }}
-          PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
-          PROD_DB_NAME: ${{ secrets.PROD_DB_NAME }}
-        run: |
-          set "PORT=%PROD_DB_PORT%" & if "%PORT%"=="" set "PORT=1433"
-          echo Target: %PROD_DB_HOST%,%PORT% / DB=%PROD_DB_NAME%
-
-       # Preflight — DNS
-      - name: DNS resolve
-        env:
-          H: ${{ secrets.PROD_DB_HOST }}
-        run: nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
-
-      # Preflight — TCP
-      - name: TCP port check
+      - name: Preflight PROD
         env:
           H: ${{ secrets.PROD_DB_HOST }}
           P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
-          set "PORT=%P%"
-          if "%PORT%"=="" set "PORT=1433"
-          echo Checking TCP connection to %H%:%PORT% ...
+          nslookup %H% || (echo ❌ DNS FAILED & exit /b 1)
+          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
           powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]'%PORT%') -InformationLevel Quiet)){exit 1}"
+          "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
 
-      - name: Test sqlcmd login (SELECT 1)
-        env:
-          PROD_DB_HOST: ${{ secrets.PROD_DB_HOST }}
-          PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
-          PROD_DB_NAME: ${{ secrets.PROD_DB_NAME }}
-          PROD_DB_USER: ${{ secrets.PROD_DB_USER }}
-          PROD_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
-        run: |
-          set "PORT=%PROD_DB_PORT%" & if "%PORT%"=="" set "PORT=1433"
-          "%SQLCMD_EXE%" -S %PROD_DB_HOST%,%PORT% -d %PROD_DB_NAME% -U %PROD_DB_USER% -P %PROD_DB_PASSWORD% -l 10 -b -C -Q "SELECT 1"
-       
-          
-      # 1) Hitung file deploy/*.sql yang berubah di push ke main
-      - name: Compute changed SQL (robust)
+      - name: Compute changed SQL (robust for PR merged)
         id: changes
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference='Stop'
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
-          git fetch --all --tags --prune 2>$null
-          $eventName = '${{ github.event_name }}'
-          $beforeSha = '${{ github.event.before }}'
-          $baseRef   = '${{ github.base_ref }}'
-          if ($eventName -eq 'pull_request' -and $baseRef) {
-            git fetch origin $baseRef --depth=1 2>$null
-            $range = "origin/$baseRef...HEAD"
-          } else {
-            if ([string]::IsNullOrWhiteSpace($beforeSha) -or $beforeSha -match '^0+$') {
-              $range = 'HEAD~1...HEAD'
-            } else {
-              $range = "$beforeSha...HEAD"
-            }
-          }
-          $changed = git diff --name-only --diff-filter=AMR $range -- "deploy/*.sql"
-          $hasChanges = if ($changed) { 'true' } else { 'false' }
-          if ($hasChanges -eq 'true') {
-            $listFile = Join-Path $env:GITHUB_WORKSPACE 'deploy\_changed_sql.txt'
-            $changed | Sort-Object | Set-Content -LiteralPath $listFile -Encoding UTF8
-            "CHANGED_SQL_LIST=$listFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          try { git fetch --all --tags --prune 2>$null } catch {}
+
+          $baseSha = '${{ github.event.pull_request.base.sha }}'
+          $baseRef = '${{ github.event.pull_request.base.ref }}'
+          if ($baseRef) { try { git fetch origin $baseRef --depth=50 2>$null } catch {} }
+
+          if ([string]::IsNullOrWhiteSpace($baseSha) -or $baseSha -match '^0+$') { $range = 'HEAD~1...HEAD' }
+          else { $range = "$baseSha...HEAD" }
+
+          $changed = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/*.sql"
+          if ($changed) {
+            $p='deploy\_changed_sql.txt'
+            $changed | Sort-Object | Set-Content -Encoding UTF8 -LiteralPath $p
+            "CHANGED_SQL_LIST=$p" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+            "has_changes=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             Write-Host "Changed SQL files (range $range):"
-            Get-Content $listFile | % { " - $_" }
+            Get-Content $p | % { " - $_" }
           } else {
-            Write-Host "No changed deploy SQL in range: $range"
-            Write-Host "::notice title=No changed SQL::Skipping backup and deploy."
+            "has_changes=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            Write-Host "::notice title=No changed SQL::Skipping deploy."
           }
-          "has_changes=$hasChanges" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-
-
-      # 2) (Opsional) hanya CREATE/ALTER TABLE
-      - name: Filter to CREATE/ALTER TABLE (PUSH)
-        if: ${{ env.CHANGED_SQL_LIST != '' }}
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $list = Get-Content $env:CHANGED_SQL_LIST
-          if (-not $list) { exit 0 }
-          $rx = [regex]'(?is)\b(?:create\s+table|alter\s+table|alter\s+column|sp_rename)\b'
-          $keep = @()
-          foreach ($f in $list) {
-            if (Test-Path $f) {
-              $t = Get-Content $f -Raw
-              if ($rx.IsMatch($t)) { $keep += $f }
-            }
-          }
-          if (-not $keep) {
-            Write-Host "No CREATE/ALTER TABLE detected."
-            Remove-Item $env:CHANGED_SQL_LIST -ErrorAction SilentlyContinue
-            exit 0
-          }
-          $keep | Sort-Object | Set-Content -LiteralPath $env:CHANGED_SQL_LIST -Encoding UTF8
-          Write-Host "Filtered list:"; Get-Content $env:CHANGED_SQL_LIST | % { " - $_" }
-
-      # 3) Generate backup script dari tabel yang tersentuh file berubah
-      - name: Generate backup script (from changed SQL) - PROD
-        if: ${{ env.CHANGED_SQL_LIST != '' }}
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ts = Get-Date -Format yyyyMMddHHmmss
-          $suffix = "__bak_$ts"
-          "BACKUP_SUFFIX=$suffix" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-
-          $files = Get-Content $env:CHANGED_SQL_LIST
-          $rx = [regex]'(?is)create\s+table\s+(?:\[?(?<schema>\w+)\]?\.)?\[?(?<table>\w+)\]?'
-          $pairs = @()
-          foreach ($f in $files) {
-            if (Test-Path $f) {
-              $content = Get-Content $f -Raw
-              foreach ($m in $rx.Matches($content)) {
-                $schema = if ($m.Groups['schema'].Success) { $m.Groups['schema'].Value } else { 'dbo' }
-                $table  = $m.Groups['table'].Value
-                if ($table) { $pairs += [PSCustomObject]@{ Schema=$schema; Table=$table } }
-              }
-            }
-          }
-          $pairs = $pairs | Sort-Object Schema,Table -Unique
-          if (-not $pairs) { Write-Host 'No CREATE TABLE found in changed SQL'; exit 0 }
-
-          $out = Join-Path $env:GITHUB_WORKSPACE ("deploy\__auto_backup_$ts.sql")
-          $sb = New-Object System.Text.StringBuilder
-          $null = $sb.AppendLine('-- auto-generated backup script (PROD)')
-          foreach ($p in $pairs) {
-            $qn = '['+$p.Schema+'].['+$p.Table+']'
-            $bk = '['+$p.Schema+'].['+$p.Table+$suffix+']'
-            $null = $sb.AppendLine("IF OBJECT_ID(N'$qn','U') IS NOT NULL")
-            $null = $sb.AppendLine("BEGIN")
-            $null = $sb.AppendLine("  IF OBJECT_ID(N'$bk','U') IS NULL")
-            $null = $sb.AppendLine("  BEGIN")
-            $null = $sb.AppendLine("    SELECT * INTO $bk FROM $qn WITH (HOLDLOCK, TABLOCKX);")
-            $null = $sb.AppendLine("  END")
-            $null = $sb.AppendLine("END")
-            $null = $sb.AppendLine("GO")
-          }
-          $sb.ToString() | Set-Content -LiteralPath $out -Encoding UTF8
-          "BACKUP_SQL=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-          Write-Host "Backup script: $out"
-
-      # 4) Jalankan backup (PROD)
-      - name: Run backup script (PROD)
-        if: ${{ env.BACKUP_SQL != '' }}
+      - name: Deploy to PRODUCTION (changed only)
+        if: steps.changes.outputs.has_changes == 'true'
         env:
-          PROD_DB_HOST: ${{ secrets.PROD_DB_HOST }}
-          PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
-          PROD_DB_NAME: ${{ secrets.PROD_DB_NAME }}
-          PROD_DB_USER: ${{ secrets.PROD_DB_USER }}
-          PROD_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
-          set "PORT=%PROD_DB_PORT%" & if "%PORT%"=="" set "PORT=1433"
-          echo Running backup: %BACKUP_SQL%
-          "%SQLCMD_EXE%" -S %PROD_DB_HOST%,%PORT% -d %PROD_DB_NAME% -U %PROD_DB_USER% -P %PROD_DB_PASSWORD% -b -C -i "%BACKUP_SQL%"
-    
-
-      - name: Deploy to PRODUCTION (changed SQL only)
-        env:
-          PROD_DB_HOST: ${{ secrets.PROD_DB_HOST }}
-          PROD_DB_PORT: ${{ secrets.PROD_DB_PORT }}
-          PROD_DB_NAME: ${{ secrets.PROD_DB_NAME }}
-          PROD_DB_USER: ${{ secrets.PROD_DB_USER }}
-          PROD_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
-        run: |
-          set "PORT=%PROD_DB_PORT%" & if "%PORT%"=="" set "PORT=1433"
-
-          if exist deploy\_changed_sql.txt (
-            for /f "usebackq delims=" %%F in (`type deploy\_changed_sql.txt`) do (
-              if exist "%%F" (
-                echo Executing %%~nxF ...
-                "%SQLCMD_EXE%" -S %PROD_DB_HOST%,%PORT% -d %PROD_DB_NAME% -U %PROD_DB_USER% -P %PROD_DB_PASSWORD% -b -C -i "%%F"
-                if errorlevel 1 exit /b 1
-              )
+          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          for /f "usebackq delims=" %%F in (`type deploy\_changed_sql.txt`) do (
+            if exist "%%F" (
+              echo PROD -> %%~nxF
+              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
             )
-          ) else (
-            echo No changed SQL list. Skipping deploy.
           )
-
-
-      - name: Upload deploy logs
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: production-deploy-logs
-          path: |
-            deploy_logs_prod/**
-            deploy/*.sql
-          if-no-files-found: warn
