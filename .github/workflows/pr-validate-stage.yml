@@ -89,12 +89,23 @@ jobs:
           $isPR = '${{ github.event_name }}' -eq 'pull_request'
           $base = '${{ github.base_ref }}'
           $before='${{ github.event.before }}'
-          if ($isPR -and $base) { try { git fetch origin $base --depth=50 2>$null } catch {} ; $range="origin/$base...HEAD" }
-          else { $range = ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') ? 'HEAD~1...HEAD' : "$before...HEAD" }
+
+          if ($isPR -and $base) {
+            try { git fetch origin $base --depth=50 2>$null } catch {}
+            $range="origin/$base...HEAD"
+          } else {
+            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') {
+              $range = 'HEAD~1...HEAD'
+            } else {
+              $range = "$before...HEAD"
+            }
+          }
+
           $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/create/*.sql"
           $wt   = git ls-files -mo --exclude-standard -- "deploy/create/*.sql"
           $all  = @(); if($diff){$all+=$diff}; if($wt){$all+=$wt}; $all=$all|Sort-Object -Unique
           if($all.Count -gt 0){ $p='deploy\_changed_create.txt'; $all|Set-Content $p -Enc UTF8; "has_changes=true" |Out-File $env:GITHUB_OUTPUT -Append; "changed_list=$p"|Out-File $env:GITHUB_OUTPUT -Append } else { "has_changes=false"|Out-File $env:GITHUB_OUTPUT -Append }
+
 
       - name: Compute changes (ALTER)
         id: chg_alter
