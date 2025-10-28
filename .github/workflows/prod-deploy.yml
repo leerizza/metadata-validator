@@ -1,11 +1,8 @@
 name: Deploy to Production (on PR merged)
 
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
-    branches: [master]       # ganti ke main jika perlu
-    paths:
-      - "deploy/**"
 
 concurrency:
   group: prod-deploy
@@ -18,12 +15,16 @@ defaults:
 jobs:
   deploy_prod:
     name: deploy_prod
-    if: ${{ github.event.pull_request.merged == true }}
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'master'
     runs-on: [self-hosted, Windows]
     environment: production
+
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
 
       - name: Resolve sqlcmd
         shell: powershell
@@ -63,11 +64,11 @@ jobs:
           try { git fetch --all --tags --prune 2>$null } catch {}
 
           $baseSha = '${{ github.event.pull_request.base.sha }}'
-          $baseRef = '${{ github.event.pull_request.base.ref }}'
-          if ($baseRef) { try { git fetch origin $baseRef --depth=50 2>$null } catch {} }
-
-          if ([string]::IsNullOrWhiteSpace($baseSha) -or $baseSha -match '^0+$') { $range = 'HEAD~1...HEAD' }
-          else { $range = "$baseSha...HEAD" }
+          if ([string]::IsNullOrWhiteSpace($baseSha) -or $baseSha -match '^0+$') {
+            $range = 'HEAD~1...HEAD'
+          } else {
+            $range = "$baseSha...HEAD"
+          }
 
           $changed = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/*.sql"
           if ($changed) {
