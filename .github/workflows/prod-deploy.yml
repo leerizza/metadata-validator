@@ -28,15 +28,21 @@ jobs:
 
       - name: Resolve sqlcmd
         shell: powershell
-        env: { VAR_SQLCMD: ${{ vars.SQLCMD_EXE }} }
+        env:
+          VAR_SQLCMD: ${{ vars.SQLCMD_EXE }}
         run: |
           $ErrorActionPreference='Stop'
           function Exists($p){ if([string]::IsNullOrWhiteSpace($p)){return $false}; Test-Path $p }
           $c=@()
           if($env:VAR_SQLCMD){ $c+=$env:VAR_SQLCMD }
-          try{$found=& where.exe sqlcmd 2>$null; if($LASTEXITCODE -eq 0){ $c+=($found -split "`r?`n" | ? { $_ -and (Test-Path $_) }) }}catch{}
-          $c+@("C:\Program Files\SqlCmd\sqlcmd.exe",
-               "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe")
+          try{
+            $found=& where.exe sqlcmd 2>$null
+            if($LASTEXITCODE -eq 0){ $c+=($found -split "`r?`n" | ? { $_ -and (Test-Path $_) }) }
+          }catch{}
+          $c+@(
+            "C:\Program Files\SqlCmd\sqlcmd.exe",
+            "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe"
+          )
           $pick=$c|?{Exists $_}|Select-Object -First 1
           if(-not $pick){ throw "sqlcmd.exe not found. Set repo variable SQLCMD_EXE or install SQL tools." }
           "SQLCMD_EXE=$pick" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
@@ -75,7 +81,7 @@ jobs:
             $p='deploy\_changed_sql.txt'
             $changed | Sort-Object | Set-Content -Encoding UTF8 -LiteralPath $p
             "CHANGED_SQL_LIST=$p" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-            "has_changes=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "has_changes=true"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             Write-Host "Changed SQL files (range $range):"
             Get-Content $p | % { " - $_" }
           } else {
