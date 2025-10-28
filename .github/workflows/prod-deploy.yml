@@ -1,12 +1,12 @@
-name: Deploy to Production (manual trigger, with backup)
+name: Deploy to PRODUCTION (Manual, Modular)
 
 on:
   workflow_dispatch:
     inputs:
-      confirm:
-        description: "Ketik 'YES' untuk konfirmasi deploy ke PRODUCTION"
-        required: true
-        default: "NO"
+      note:
+        description: "Catatan (opsional)"
+        required: false
+        default: ""
 
 concurrency:
   group: prod-deploy
@@ -17,44 +17,46 @@ defaults:
     shell: cmd
 
 jobs:
-  deploy_prod:
-    name: Deploy to Production
+  compute_changes:
     runs-on: [self-hosted, Windows]
-    environment: production
-    if: ${{ github.event.inputs.confirm == 'YES' }}
-
+    outputs:
+      has_create: ${{ steps.outvars.outputs.has_create }}
+      has_alter:  ${{ steps.outvars.outputs.has_alter }}
+      has_drop:   ${{ steps.outvars.outputs.has_drop }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # Cari sqlcmd.exe (pakai repo variable SQLCMD_EXE kalau ada)
       - name: Resolve sqlcmd
         shell: powershell
-        env:
-          VAR_SQLCMD: ${{ vars.SQLCMD_EXE }}
+        env: { VAR_SQLCMD: ${{ vars.SQLCMD_EXE }} }
         run: |
           $ErrorActionPreference='Stop'
           function Exists($p){ if([string]::IsNullOrWhiteSpace($p)){return $false}; Test-Path $p }
           $c=@()
           if($env:VAR_SQLCMD){ $c+=$env:VAR_SQLCMD }
-          try{
-            $found=& where.exe sqlcmd 2>$null
-            if($LASTEXITCODE -eq 0){ $c+=($found -split "`r?`n" | ? { $_ -and (Test-Path $_) }) }
-          }catch{}
-          $c+@(
+          try { $found=& where.exe sqlcmd 2>$null; if($LASTEXITCODE -eq 0){ $c+=($found -split "`r?`n" | ? { $_ -and (Test-Path $_) }) } } catch {}
+          $c+=@(
             "C:\Program Files\SqlCmd\sqlcmd.exe",
             "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe",
             "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe",
-            "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe"
+            "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe",
+            "C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe"
           )
           $pick=$c|?{Exists $_}|Select-Object -First 1
           if(-not $pick){ throw "sqlcmd.exe not found. Set repo variable SQLCMD_EXE or install SQL tools." }
           "SQLCMD_EXE=$pick" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
           Write-Host "Using sqlcmd: $pick"
 
-      # Preflight koneksi ke PROD
-      - name: Preflight Connection (DNS/TCP/login)
+      - name: Prep logs
+        shell: powershell
+        run: |
+          $root = Join-Path $env:GITHUB_WORKSPACE 'deploy_logs_prod'
+          if (!(Test-Path $root)) { New-Item -ItemType Directory -Path $root -Force | Out-Null }
+          "LOGDIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+
+      - name: Preflight PROD
         env:
           H: ${{ secrets.PROD_DB_HOST }}
           P: ${{ secrets.PROD_DB_PORT }}
@@ -67,34 +69,149 @@ jobs:
           powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]'%PORT%') -InformationLevel Quiet)){exit 1}"
           "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
 
-      # Hitung file deploy/*.sql yang berubah di commit terakhir (bisa kamu ubah logikanya nanti)
-      - name: Compute changed SQL (since last commit)
-        id: changes
+      - name: Compute changed files (CREATE/ALTER/DROP)
+        id: compute
         shell: powershell
         run: |
           $ErrorActionPreference='Stop'
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
           try { git fetch --all --tags --prune 2>$null } catch {}
-
-          # Default: bandingkan HEAD~1...HEAD (commit terakhir)
-          $range = 'HEAD~1...HEAD'
-          $changed = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/*.sql"
-
-          if ($changed) {
-            $p='deploy\_changed_sql.txt'
-            $changed | Sort-Object | Set-Content -Encoding UTF8 -LiteralPath $p
-            "CHANGED_SQL_LIST=$p" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-            "has_changes=true"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-            Write-Host "Changed SQL files (range $range):"
-            Get-Content $p | % { " - $_" }
-          } else {
-            "has_changes=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-            Write-Host "::notice title=No changed SQL::Skipping backup and deploy."
+          # Karena manual, asumsikan run di default branch (mis. master/main)
+          # Range default: HEAD~1...HEAD (commit terakhir vs sebelumnya)
+          $range='HEAD~1...HEAD'
+          $lists=@{
+            create = @{ pattern = "deploy/create/*.sql"; out="deploy\_changed_create.txt" };
+            alter  = @{ pattern = "deploy/alter/*.sql";  out="deploy\_changed_alter.txt"  };
+            drop   = @{ pattern = "deploy/drop/*.sql";   out="deploy\_changed_drop.txt"   };
+          }
+          $flags=@{ create=$false; alter=$false; drop=$false }
+          foreach($k in $lists.Keys){
+            $p=$lists[$k].pattern
+            $o=$lists[$k].out
+            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- $p
+            $wt   = git ls-files -mo --exclude-standard -- $p
+            $all=@(); if($diff){$all+=$diff}; if($wt){$all+=$wt}; $all=$all|Sort-Object -Unique
+            if($all.Count -gt 0){ $all|Set-Content -LiteralPath $o -Encoding UTF8; $flags[$k]=$true; Write-Host "$k changed:"; $all|%{" - $_"} }
+            else { Write-Host "$k: no changes" }
+          }
+          if(-not ($flags.create -or $flags.alter -or $flags.drop)){
+            Write-Host "::notice title=No changed SQL::Nothing to deploy."
           }
 
-      # (Baru) Generate & jalankan BACKUP sebelum eksekusi
-      - name: Generate & Run Backup (for affected tables)
-        if: steps.changes.outputs.has_changes == 'true'
+      - name: Expose outputs
+        id: outvars
+        shell: powershell
+        run: |
+          function HasList($f){ Test-Path $f -PathType Leaf -ErrorAction SilentlyContinue }
+          $hasCreate = (HasList 'deploy\_changed_create.txt') ? 'true' : 'false'
+          $hasAlter  = (HasList 'deploy\_changed_alter.txt')  ? 'true' : 'false'
+          $hasDrop   = (HasList 'deploy\_changed_drop.txt')   ? 'true' : 'false'
+          "has_create=$hasCreate" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "has_alter=$hasAlter"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "has_drop=$hasDrop"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload change lists
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-changed-sql-lists
+          path: |
+            deploy\_changed_*.txt
+          if-no-files-found: ignore
+
+  deploy_create_prod:
+    needs: compute_changes
+    if: needs.compute_changes.outputs.has_create == 'true'
+    runs-on: [self-hosted, Windows]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: prod-changed-sql-lists }
+
+      - name: Use sqlcmd
+        run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
+
+      - name: Guard disallowed types (CREATE only)
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          if(!(Test-Path 'deploy\_changed_create.txt')){ exit 0 }
+          $patMax    = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)'
+          $patLegacy = '\b(?:text|ntext|image)\b'
+          $bad=$legacy=$null
+          foreach($f in Get-Content 'deploy\_changed_create.txt'){
+            if(Test-Path $f){
+              $t=(Get-Content $f -Raw)
+              if($t -match $patMax){ $bad += $f }
+              if($t -match $patLegacy){ $legacy += $f }
+            }
+          }
+          if($bad -or $legacy){
+            Write-Host '❌ Disallowed in CREATE:'
+            if($bad){ $bad|Sort-Object -Unique|%{" - $_"} }
+            if($legacy){ $legacy|Sort-Object -Unique|%{" - $_"} }
+            exit 1
+          }
+          Write-Host '✅ CREATE type guard passed.'
+
+      - name: Deploy CREATE (changed only)
+        env:
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
+        run: |
+          if not exist "deploy\_changed_create.txt" (
+            echo ⚠️ No changed CREATE list. Skipping.
+            exit /b 0
+          )
+          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          for /f "usebackq delims=" %%F in (`type deploy\_changed_create.txt`) do (
+            if exist "%%F" (
+              echo PROD CREATE -> %%~nxF
+              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
+            )
+          )
+
+  deploy_alter_prod:
+    needs: [compute_changes, deploy_create_prod]
+    if: needs.compute_changes.outputs.has_alter == 'true'
+    runs-on: [self-hosted, Windows]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: prod-changed-sql-lists }
+
+      - name: Use sqlcmd
+        run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
+
+      - name: Guard disallowed types (ALTER only)
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          if(!(Test-Path 'deploy\_changed_alter.txt')){ exit 0 }
+          $patMax    = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)'
+          $patLegacy = '\b(?:text|ntext|image)\b'
+          $bad=$legacy=$null
+          foreach($f in Get-Content 'deploy\_changed_alter.txt'){
+            if(Test-Path $f){
+              $t=(Get-Content $f -Raw)
+              if($t -match $patMax){ $bad += $f }
+              if($t -match $patLegacy){ $legacy += $f }
+            }
+          }
+          if($bad -or $legacy){
+            Write-Host '❌ Disallowed in ALTER:'
+            if($bad){ $bad|Sort-Object -Unique|%{" - $_"} }
+            if($legacy){ $legacy|Sort-Object -Unique|%{" - $_"} }
+            exit 1
+          }
+          Write-Host '✅ ALTER type guard passed.'
+
+      - name: Generate & run backup (ALTER)
         shell: powershell
         env:
           H: ${{ secrets.PROD_DB_HOST }}
@@ -104,54 +221,37 @@ jobs:
           W: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
           $ErrorActionPreference='Stop'
-          $list = Get-Content 'deploy\_changed_sql.txt'
-          if(-not $list){ Write-Host "No changed list"; exit 0 }
-
-          # Regex cari nama tabel dari CREATE TABLE & ALTER TABLE
-          $rxCreate = [regex]'(?is)\bcreate\s+table\s+(?:\[?(?<s>\w+)\]?\.)?\[?(?<t>\w+)\]?'
-          $rxAlter  = [regex]'(?is)\balter\s+table\s+(?:\[?(?<s>\w+)\]?\.)?\[?(?<t>\w+)\]?'
-
+          if(!(Test-Path 'deploy\_changed_alter.txt')){ exit 0 }
+          $ts=Get-Date -Format yyyyMMddHHmmss
+          $out="deploy\__auto_backup_alter_prod_$ts.sql"
+          $rx=[regex]'(?is)\balter\s+table\s+(?:\[?(?<s>\w+)\]?\.)?\[?(?<t>\w+)\]?'
           $pairs=@()
-          foreach($f in $list){
+          foreach($f in Get-Content 'deploy\_changed_alter.txt'){
             if(Test-Path $f){
-              $c = Get-Content $f -Raw
-              foreach($m in $rxCreate.Matches($c)){
-                $s = $m.Groups['s'].Success ? $m.Groups['s'].Value : 'dbo'
-                $t = $m.Groups['t'].Value
-                if($t){ $pairs += "$s.$t" }
-              }
-              foreach($m in $rxAlter.Matches($c)){
+              $c=Get-Content $f -Raw
+              foreach($m in $rx.Matches($c)){
                 $s = $m.Groups['s'].Success ? $m.Groups['s'].Value : 'dbo'
                 $t = $m.Groups['t'].Value
                 if($t){ $pairs += "$s.$t" }
               }
             }
           }
-          $pairs = $pairs | Sort-Object -Unique
-          if(-not $pairs){ Write-Host "No affected tables found. Skip backup."; exit 0 }
-
-          $ts = Get-Date -Format yyyyMMddHHmmss
-          $out = "deploy\__auto_backup_prod_$ts.sql"
-          $sb = New-Object System.Text.StringBuilder
-          $null = $sb.AppendLine('-- auto-generated backup script (PROD)')
-
+          $pairs=$pairs|Sort-Object -Unique
+          if(!$pairs){ Write-Host "No ALTER target tables. Skip backup."; exit 0 }
+          $sb=New-Object Text.StringBuilder
           foreach($qn in $pairs){
-            $schema,$table = $qn.Split('.')
-            $qn2 = "[$schema].[$table]"
-            $bk  = "[$schema].["+$table+"__bak_"+$ts+"]"
+            $schema,$table=$qn.Split('.')
+            $bk="[$schema].[$table"+"__bak_$ts]"
+            $qn2="[$schema].[$table]"
             [void]$sb.AppendLine("IF OBJECT_ID(N'$qn2','U') IS NOT NULL AND OBJECT_ID(N'$bk','U') IS NULL")
             [void]$sb.AppendLine("BEGIN SELECT * INTO $bk FROM $qn2 WITH (HOLDLOCK, TABLOCKX); END")
             [void]$sb.AppendLine("GO")
           }
+          $sb.ToString() | Set-Content -Path $out -Encoding UTF8
+          $port="${{ secrets.PROD_DB_PORT }}"; if([string]::IsNullOrWhiteSpace($port)){$port='1433'}
+          & "$env:SQLCMD_EXE" -S "${{ secrets.PROD_DB_HOST }}",$port -d "${{ secrets.PROD_DB_NAME }}" -U "${{ secrets.PROD_DB_USER }}" -P "${{ secrets.PROD_DB_PASSWORD }}" -b -C -i $out
 
-          $sb.ToString() | Set-Content -LiteralPath $out -Encoding UTF8
-
-          $port = $env:P; if([string]::IsNullOrWhiteSpace($port)){$port='1433'}
-          & "$env:SQLCMD_EXE" -S $env:H,$port -d $env:D -U $env:U -P $env:W -b -C -i $out
-
-      # Deploy hanya file yang berubah (berdasarkan daftar)
-      - name: Deploy to PRODUCTION (changed only)
-        if: steps.changes.outputs.has_changes == 'true'
+      - name: Deploy ALTER (changed only)
         env:
           H: ${{ secrets.PROD_DB_HOST }}
           P: ${{ secrets.PROD_DB_PORT }}
@@ -159,20 +259,83 @@ jobs:
           U: ${{ secrets.PROD_DB_USER }}
           W: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
+          if not exist "deploy\_changed_alter.txt" (
+            echo ⚠️ No changed ALTER list. Skipping.
+            exit /b 0
+          )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
-          for /f "usebackq delims=" %%F in (`type deploy\_changed_sql.txt`) do (
+          for /f "usebackq delims=" %%F in (`type deploy\_changed_alter.txt`) do (
             if exist "%%F" (
-              echo 🚀 Executing %%~nxF on Production...
+              echo PROD ALTER -> %%~nxF
               "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
             )
           )
 
+  deploy_drop_prod:
+    needs: [compute_changes, deploy_create_prod, deploy_alter_prod]
+    if: needs.compute_changes.outputs.has_drop == 'true'
+    runs-on: [self-hosted, Windows]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: prod-changed-sql-lists }
+
+      - name: Use sqlcmd
+        run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
+
+      - name: Guard allowlist DROP
+        shell: powershell
+        run: |
+          $allow=Get-Content -ErrorAction SilentlyContinue '.github\drop-allowlist.txt'
+          if(-not $allow){ Write-Host "::warning No drop-allowlist.txt -> all DROP blocked"; exit 1 }
+          if(!(Test-Path 'deploy\_changed_drop.txt')){ Write-Host "No DROP list. Skip."; exit 0 }
+          $rx=[regex]'(?is)\bdrop\s+table\s+(?:\[?(?<s>\w+)\]?\.)?\[?(?<t>\w+)\]?'
+          foreach($f in Get-Content 'deploy\_changed_drop.txt'){
+            if(Test-Path $f){
+              $c=Get-Content $f -Raw
+              foreach($m in $rx.Matches($c)){
+                $s=$m.Groups['s'].Success?$m.Groups['s'].Value:'dbo'
+                $t=$m.Groups['t'].Value
+                $full="$s.$t"
+                if($allow -notcontains $full){
+                  Write-Error "DROP not in allowlist: $full (file $f)"
+                }
+              }
+            }
+          }
+
+      - name: Deploy DROP (changed only)
+        env:
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
+        run: |
+          if not exist "deploy\_changed_drop.txt" (
+            echo ⚠️ No changed DROP list. Skipping.
+            exit /b 0
+          )
+          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          for /f "usebackq delims=" %%F in (`type deploy\_changed_drop.txt`) do (
+            if exist "%%F" (
+              echo PROD DROP -> %%~nxF
+              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
+            )
+          )
+
+  upload_logs_prod:
+    if: always()
+    needs: [compute_changes, deploy_create_prod, deploy_alter_prod, deploy_drop_prod]
+    runs-on: [self-hosted, Windows]
+    steps:
+      - uses: actions/checkout@v4
       - name: Upload deploy logs
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: production-deploy-logs
           path: |
             deploy_logs_prod/**
-            deploy/*.sql
+            deploy\__auto_backup_*.sql
           if-no-files-found: warn
