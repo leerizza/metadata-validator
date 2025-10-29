@@ -23,6 +23,9 @@ jobs:
       has_create: ${{ steps.outvars.outputs.has_create }}
       has_alter:  ${{ steps.outvars.outputs.has_alter }}
       has_drop:   ${{ steps.outvars.outputs.has_drop }}
+      create_count: ${{ steps.outvars.outputs.create_count }}
+      alter_count:  ${{ steps.outvars.outputs.alter_count }}
+      drop_count:   ${{ steps.outvars.outputs.drop_count }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,8 +79,18 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
-          try { git fetch --all --tags --prune 2>$null } catch {}
+          
+          # Fetch dengan lebih thorough
+          try { 
+            git fetch origin --depth=100 2>$null
+            git fetch --all --tags --prune 2>$null 
+          } catch {}
+          
+          # Untuk manual workflow_dispatch, bandingkan dengan commit sebelumnya
           $range='HEAD~1...HEAD'
+          Write-Host "Git diff range: $range"
+          Write-Host "Current branch: $(git branch --show-current)"
+          Write-Host "Current HEAD: $(git rev-parse HEAD)"
 
           $lists=@{
             create = @{ pattern = "deploy/create/*.sql"; out="deploy\_changed_create.txt" };
@@ -86,39 +99,99 @@ jobs:
           }
 
           $flags=@{ create=$false; alter=$false; drop=$false }
+          $counts=@{ create=0; alter=0; drop=0 }
 
           foreach($k in $lists.Keys){
             $p=$lists[$k].pattern
             $o=$lists[$k].out
-            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- $p
-            $wt   = git ls-files -mo --exclude-standard -- $p
-            $all=@(); if($diff){$all+=$diff}; if($wt){$all+=$wt}; $all=$all|Sort-Object -Unique
+            
+            Write-Host ""
+            Write-Host "Checking $k files..."
+            
+            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- $p 2>$null
+            $wt   = git ls-files -mo --exclude-standard -- $p 2>$null
+            $all=@()
+            if($diff){$all+=$diff}
+            if($wt){$all+=$wt}
+            
+            # Filter hanya file yang benar-benar ada
+            $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
+            
             if($all.Count -gt 0){
-              $all|Set-Content -LiteralPath $o -Encoding UTF8
+              $all | Set-Content -LiteralPath $o -Encoding UTF8
               $flags[$k]=$true
-              Write-Host "$($k) changed:"
-              $all | ForEach-Object { " - $_" }
+              $counts[$k]=$all.Count
+              Write-Host "✅ $($k.ToUpper()) changed ($($all.Count) files):"
+              $all | ForEach-Object { 
+                Write-Host "   - $_" 
+                if (Test-Path $_) {
+                  $size = (Get-Item $_).Length
+                  Write-Host "     Size: $size bytes"
+                }
+              }
             }
             else {
-              Write-Host "$($k): no changes"
+              Write-Host "ℹ️ $($k.ToUpper()): no changes detected"
+              $flags[$k]=$false
+              $counts[$k]=0
             }
           }
 
           if(-not ($flags.create -or $flags.alter -or $flags.drop)){
             Write-Host "::notice title=No changed SQL::Nothing to deploy."
           }
+          
+          Write-Host ""
+          Write-Host "========================================="
+          Write-Host "DEPLOYMENT DETECTION SUMMARY"
+          Write-Host "========================================="
+          Write-Host "CREATE: $($counts.create) files"
+          Write-Host "ALTER:  $($counts.alter) files"
+          Write-Host "DROP:   $($counts.drop) files"
+          Write-Host "========================================="
 
       - name: Expose outputs
         id: outvars
         shell: powershell
         run: |
-          function HasList($f){ Test-Path $f -PathType Leaf -ErrorAction SilentlyContinue }
-          $hasCreate = 'false'; if(HasList 'deploy\_changed_create.txt'){ $hasCreate='true' }
-          $hasAlter  = 'false'; if(HasList 'deploy\_changed_alter.txt'){  $hasAlter='true'  }
-          $hasDrop   = 'false'; if(HasList 'deploy\_changed_drop.txt'){   $hasDrop='true'   }
+          function HasList($f){ 
+            if(!(Test-Path $f -PathType Leaf -ErrorAction SilentlyContinue)){ return $false }
+            $content = Get-Content $f -ErrorAction SilentlyContinue
+            return ($content -and $content.Count -gt 0)
+          }
+          
+          $hasCreate = 'false'
+          $createCount = 0
+          if(HasList 'deploy\_changed_create.txt'){ 
+            $hasCreate='true'
+            $createCount = (Get-Content 'deploy\_changed_create.txt').Count
+          }
+          
+          $hasAlter = 'false'
+          $alterCount = 0
+          if(HasList 'deploy\_changed_alter.txt'){ 
+            $hasAlter='true'
+            $alterCount = (Get-Content 'deploy\_changed_alter.txt').Count
+          }
+          
+          $hasDrop = 'false'
+          $dropCount = 0
+          if(HasList 'deploy\_changed_drop.txt'){ 
+            $hasDrop='true'
+            $dropCount = (Get-Content 'deploy\_changed_drop.txt').Count
+          }
+          
           "has_create=$hasCreate" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "has_alter=$hasAlter"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "has_drop=$hasDrop"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "create_count=$createCount" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "alter_count=$alterCount"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "drop_count=$dropCount"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          
+          Write-Host "Output flags:"
+          Write-Host "  has_create=$hasCreate (count: $createCount)"
+          Write-Host "  has_alter=$hasAlter (count: $alterCount)"
+          Write-Host "  has_drop=$hasDrop (count: $dropCount)"
 
       - name: Upload change lists
         if: always()
@@ -131,7 +204,7 @@ jobs:
 
   deploy_create_prod:
     needs: compute_changes
-    if: needs.compute_changes.outputs.has_create == 'true'
+    if: needs.compute_changes.outputs.has_create == 'true' && needs.compute_changes.outputs.create_count != '0'
     runs-on: [self-hosted, Windows]
     environment: production
     steps:
@@ -142,6 +215,20 @@ jobs:
 
       - name: Use sqlcmd
         run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
+
+      - name: Verify change list
+        shell: powershell
+        run: |
+          if (!(Test-Path 'deploy\_changed_create.txt')) {
+            Write-Host "::error::File not found!"
+            exit 1
+          }
+          $content = Get-Content 'deploy\_changed_create.txt'
+          if (!$content -or $content.Count -eq 0) {
+            Write-Host "::error::File is empty!"
+            exit 1
+          }
+          Write-Host "✅ Found $($content.Count) file(s)"
 
       - name: Guard disallowed types (CREATE only)
         shell: powershell
@@ -166,6 +253,18 @@ jobs:
           }
           Write-Host '✅ CREATE type guard passed.'
 
+      - name: Show files to deploy
+        shell: powershell
+        run: |
+          Write-Host "Files to be deployed to PRODUCTION:"
+          Get-Content 'deploy\_changed_create.txt' | ForEach-Object { 
+            Write-Host "  📄 $_"
+            if (Test-Path $_) {
+              $size = (Get-Item $_).Length
+              Write-Host "     Size: $size bytes"
+            }
+          }
+
       - name: Deploy CREATE (changed only)
         env:
           H: ${{ secrets.PROD_DB_HOST }}
@@ -173,22 +272,56 @@ jobs:
           D: ${{ secrets.PROD_DB_NAME }}
           U: ${{ secrets.PROD_DB_USER }}
           W: ${{ secrets.PROD_DB_PASSWORD }}
+        shell: cmd
         run: |
+          setlocal EnableDelayedExpansion
           if not exist "deploy\_changed_create.txt" (
-            echo No changed CREATE list. Skipping.
-            exit /b 0
+            echo ❌ No changed CREATE list. Skipping.
+            exit /b 1
           )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          set "DEPLOYED=0"
+          set "FAILED=0"
+          
           for /f "usebackq delims=" %%F in (`type deploy\_changed_create.txt`) do (
-            if exist "%%F" (
-              echo PROD CREATE -> %%~nxF
-              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
+            if not "%%F"=="" (
+              if exist "%%F" (
+                echo.
+                echo =====================================
+                echo 🚀 PROD CREATE -> %%~nxF
+                echo =====================================
+                "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F"
+                if errorlevel 1 (
+                  echo ❌ FAILED: %%~nxF
+                  set /a FAILED+=1
+                  exit /b 1
+                ) else (
+                  echo ✅ SUCCESS: %%~nxF
+                  set /a DEPLOYED+=1
+                )
+              ) else (
+                echo ❌ File not found: %%F
+                exit /b 1
+              )
             )
+          )
+          
+          echo.
+          echo =====================================
+          echo 📊 PROD CREATE Summary
+          echo =====================================
+          echo Deployed: !DEPLOYED!
+          echo Failed: !FAILED!
+          echo =====================================
+          
+          if !DEPLOYED! EQU 0 (
+            echo ⚠️ No files were deployed!
+            exit /b 1
           )
 
   deploy_alter_prod:
     needs: [compute_changes, deploy_create_prod]
-    if: needs.compute_changes.outputs.has_alter == 'true'
+    if: needs.compute_changes.outputs.has_alter == 'true' && needs.compute_changes.outputs.alter_count != '0'
     runs-on: [self-hosted, Windows]
     environment: production
     steps:
@@ -270,22 +403,33 @@ jobs:
           D: ${{ secrets.PROD_DB_NAME }}
           U: ${{ secrets.PROD_DB_USER }}
           W: ${{ secrets.PROD_DB_PASSWORD }}
+        shell: cmd
         run: |
+          setlocal EnableDelayedExpansion
           if not exist "deploy\_changed_alter.txt" (
-            echo No changed ALTER list. Skipping.
-            exit /b 0
+            echo ❌ No changed ALTER list. Skipping.
+            exit /b 1
           )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          set "DEPLOYED=0"
+          
           for /f "usebackq delims=" %%F in (`type deploy\_changed_alter.txt`) do (
             if exist "%%F" (
-              echo PROD ALTER -> %%~nxF
+              echo.
+              echo 🚀 PROD ALTER -> %%~nxF
               "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
+              echo ✅ SUCCESS: %%~nxF
+              set /a DEPLOYED+=1
+            ) else (
+              echo ❌ File not found: %%F
+              exit /b 1
             )
           )
+          echo Deployed !DEPLOYED! ALTER file(s)
 
   deploy_drop_prod:
     needs: [compute_changes, deploy_create_prod, deploy_alter_prod]
-    if: needs.compute_changes.outputs.has_drop == 'true'
+    if: needs.compute_changes.outputs.has_drop == 'true' && needs.compute_changes.outputs.drop_count != '0'
     runs-on: [self-hosted, Windows]
     environment: production
     steps:
@@ -325,18 +469,29 @@ jobs:
           D: ${{ secrets.PROD_DB_NAME }}
           U: ${{ secrets.PROD_DB_USER }}
           W: ${{ secrets.PROD_DB_PASSWORD }}
+        shell: cmd
         run: |
+          setlocal EnableDelayedExpansion
           if not exist "deploy\_changed_drop.txt" (
-            echo No changed DROP list. Skipping.
-            exit /b 0
+            echo ❌ No changed DROP list. Skipping.
+            exit /b 1
           )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          set "DEPLOYED=0"
+          
           for /f "usebackq delims=" %%F in (`type deploy\_changed_drop.txt`) do (
             if exist "%%F" (
-              echo PROD DROP -> %%~nxF
+              echo.
+              echo 🚀 PROD DROP -> %%~nxF
               "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
+              echo ✅ SUCCESS: %%~nxF
+              set /a DEPLOYED+=1
+            ) else (
+              echo ❌ File not found: %%F
+              exit /b 1
             )
           )
+          echo Deployed !DEPLOYED! DROP file(s)
 
   upload_logs_prod:
     if: ${{ always() }}
