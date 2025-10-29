@@ -108,14 +108,393 @@ jobs:
             Write-Host ""
             Write-Host "Checking $k files..."
             
-            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- $p 2>$null
-            $wt   = git ls-files -mo --exclude-standard -- $p 2>$null
-            $all=@()
-            if($diff){$all+=$diff}
-            if($wt){$all+=$wt}
+            # Extract folder path from pattern
+            $folder = $p -replace '/\*\.sql
+
+          if(-not ($flags.create -or $flags.alter -or $flags.drop)){
+            Write-Host "::notice title=No changed SQL::Nothing to deploy."
+          }
+          
+          Write-Host ""
+          Write-Host "========================================="
+          Write-Host "DEPLOYMENT DETECTION SUMMARY"
+          Write-Host "========================================="
+          Write-Host "CREATE: $($counts.create) files"
+          Write-Host "ALTER:  $($counts.alter) files"
+          Write-Host "DROP:   $($counts.drop) files"
+          Write-Host "========================================="
+
+      - name: Expose outputs
+        id: outvars
+        shell: powershell
+        run: |
+          function HasList($f){ 
+            if(!(Test-Path $f -PathType Leaf -ErrorAction SilentlyContinue)){ return $false }
+            $content = Get-Content $f -ErrorAction SilentlyContinue
+            return ($content -and $content.Count -gt 0)
+          }
+          
+          $hasCreate = 'false'
+          $createCount = 0
+          if(HasList 'deploy\_changed_create.txt'){ 
+            $hasCreate='true'
+            $createCount = (Get-Content 'deploy\_changed_create.txt').Count
+          }
+          
+          $hasAlter = 'false'
+          $alterCount = 0
+          if(HasList 'deploy\_changed_alter.txt'){ 
+            $hasAlter='true'
+            $alterCount = (Get-Content 'deploy\_changed_alter.txt').Count
+          }
+          
+          $hasDrop = 'false'
+          $dropCount = 0
+          if(HasList 'deploy\_changed_drop.txt'){ 
+            $hasDrop='true'
+            $dropCount = (Get-Content 'deploy\_changed_drop.txt').Count
+          }
+          
+          "has_create=$hasCreate" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "has_alter=$hasAlter"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "has_drop=$hasDrop"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "create_count=$createCount" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "alter_count=$alterCount"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "drop_count=$dropCount"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          
+          Write-Host "Output flags:"
+          Write-Host "  has_create=$hasCreate (count: $createCount)"
+          Write-Host "  has_alter=$hasAlter (count: $alterCount)"
+          Write-Host "  has_drop=$hasDrop (count: $dropCount)"
+
+      - name: Upload change lists
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-changed-sql-lists
+          path: |
+            deploy\_changed_*.txt
+          if-no-files-found: ignore
+
+  deploy_create_prod:
+    needs: compute_changes
+    if: needs.compute_changes.outputs.has_create == 'true' && needs.compute_changes.outputs.create_count != '0'
+    runs-on: [self-hosted, Windows]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: prod-changed-sql-lists
+
+      - name: Use sqlcmd
+        run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
+
+      - name: Verify change list
+        shell: powershell
+        run: |
+          if (!(Test-Path 'deploy\_changed_create.txt')) {
+            Write-Host "::error::File not found!"
+            exit 1
+          }
+          $content = Get-Content 'deploy\_changed_create.txt'
+          if (!$content -or $content.Count -eq 0) {
+            Write-Host "::error::File is empty!"
+            exit 1
+          }
+          Write-Host "[OK] Found $($content.Count) file(s)"
+
+      - name: Guard disallowed types (CREATE only)
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          if(!(Test-Path 'deploy\_changed_create.txt')){ exit 0 }
+          $patMax    = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)'
+          $patLegacy = '\b(?:text|ntext|image)\b'
+          $bad=$legacy=$null
+          foreach($f in Get-Content 'deploy\_changed_create.txt'){
+            if(Test-Path $f){
+              $t=(Get-Content $f -Raw)
+              if($t -match $patMax){ $bad += $f }
+              if($t -match $patLegacy){ $legacy += $f }
+            }
+          }
+          if($bad -or $legacy){
+            Write-Host '❌ Disallowed in CREATE:'
+            if($bad){ $bad|Sort-Object -Unique|ForEach-Object{ " - $_" } }
+            if($legacy){ $legacy|Sort-Object -Unique|ForEach-Object{ " - $_" } }
+            exit 1
+          }
+          Write-Host '[OK] CREATE type guard passed.'
+
+      - name: Show files to deploy
+        shell: powershell
+        run: |
+          Write-Host "Files to be deployed to PRODUCTION:"
+          Get-Content 'deploy\_changed_create.txt' | ForEach-Object { 
+            Write-Host "  > $_"
+            if (Test-Path $_) {
+              $size = (Get-Item $_).Length
+              Write-Host "     Size: $size bytes"
+            }
+          }
+
+      - name: Deploy CREATE (changed only)
+        env:
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          if not exist "deploy\_changed_create.txt" (
+            echo [ERROR] No changed CREATE list. Skipping.
+            exit /b 1
+          )
+          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          set "DEPLOYED=0"
+          set "FAILED=0"
+          
+          for /f "usebackq delims=" %%F in (`type deploy\_changed_create.txt`) do (
+            if not "%%F"=="" (
+              if exist "%%F" (
+                echo.
+                echo =====================================
+                echo [DEPLOY] PROD CREATE: %%~nxF
+                echo =====================================
+                "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F"
+                if errorlevel 1 (
+                  echo [FAILED] %%~nxF
+                  set /a FAILED+=1
+                  exit /b 1
+                ) else (
+                  echo [SUCCESS] %%~nxF
+                  set /a DEPLOYED+=1
+                )
+              ) else (
+                echo [ERROR] File not found: %%F
+                exit /b 1
+              )
+            )
+          )
+          
+          echo.
+          echo =====================================
+          echo [SUMMARY] PROD CREATE Deployment
+          echo =====================================
+          echo Deployed: !DEPLOYED!
+          echo Failed: !FAILED!
+          echo =====================================
+          
+          if !DEPLOYED! EQU 0 (
+            echo [WARNING] No files were deployed!
+            exit /b 1
+          )
+
+  deploy_alter_prod:
+    needs: [compute_changes, deploy_create_prod]
+    if: needs.compute_changes.outputs.has_alter == 'true' && needs.compute_changes.outputs.alter_count != '0'
+    runs-on: [self-hosted, Windows]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: prod-changed-sql-lists
+
+      - name: Use sqlcmd
+        run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
+
+      - name: Guard disallowed types (ALTER only)
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          if(!(Test-Path 'deploy\_changed_alter.txt')){ exit 0 }
+          $patMax    = '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)'
+          $patLegacy = '\b(?:text|ntext|image)\b'
+          $bad=$legacy=$null
+          foreach($f in Get-Content 'deploy\_changed_alter.txt'){
+            if(Test-Path $f){
+              $t=(Get-Content $f -Raw)
+              if($t -match $patMax){ $bad += $f }
+              if($t -match $patLegacy){ $legacy += $f }
+            }
+          }
+          if($bad -or $legacy){
+            Write-Host '❌ Disallowed in ALTER:'
+            if($bad){ $bad|Sort-Object -Unique|ForEach-Object{ " - $_" } }
+            if($legacy){ $legacy|Sort-Object -Unique|ForEach-Object{ " - $_" } }
+            exit 1
+          }
+          Write-Host '[OK] ALTER type guard passed.'
+
+      - name: Generate & run backup (ALTER)
+        shell: powershell
+        env:
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
+        run: |
+          $ErrorActionPreference='Stop'
+          if(!(Test-Path 'deploy\_changed_alter.txt')){ exit 0 }
+          $ts=Get-Date -Format yyyyMMddHHmmss
+          $out="deploy\__auto_backup_alter_prod_$ts.sql"
+          $rx=[regex]'(?is)\balter\s+table\s+(?:\[?(?<s>\w+)\]?\.)?\[?(?<t>\w+)\]?'
+          $pairs=@()
+          foreach($f in Get-Content 'deploy\_changed_alter.txt'){
+            if(Test-Path $f){
+              $c=Get-Content $f -Raw
+              foreach($m in $rx.Matches($c)){
+                $s = $m.Groups['s'].Success ? $m.Groups['s'].Value : 'dbo'
+                $t = $m.Groups['t'].Value
+                if($t){ $pairs += "$s.$t" }
+              }
+            }
+          }
+          $pairs=$pairs|Sort-Object -Unique
+          if(-not $pairs){ Write-Host "No ALTER target tables. Skip backup."; exit 0 }
+          $sb=New-Object Text.StringBuilder
+          foreach($qn in $pairs){
+            $schema,$table=$qn.Split('.')
+            $bk="[$schema].[$table"+"__bak_$ts]"
+            $qn2="[$schema].[$table]"
+            [void]$sb.AppendLine("IF OBJECT_ID(N'$qn2','U') IS NOT NULL AND OBJECT_ID(N'$bk','U') IS NULL")
+            [void]$sb.AppendLine("BEGIN SELECT * INTO $bk FROM $qn2 WITH (HOLDLOCK, TABLOCKX); END")
+            [void]$sb.AppendLine("GO")
+          }
+          $sb.ToString() | Set-Content -Path $out -Encoding UTF8
+          $port="${{ secrets.PROD_DB_PORT }}"; if([string]::IsNullOrWhiteSpace($port)){$port='1433'}
+          & "$env:SQLCMD_EXE" -S "${{ secrets.PROD_DB_HOST }}",$port -d "${{ secrets.PROD_DB_NAME }}" -U "${{ secrets.PROD_DB_USER }}" -P "${{ secrets.PROD_DB_PASSWORD }}" -b -C -i $out
+
+      - name: Deploy ALTER (changed only)
+        env:
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          if not exist "deploy\_changed_alter.txt" (
+            echo [ERROR] No changed ALTER list. Skipping.
+            exit /b 1
+          )
+          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          set "DEPLOYED=0"
+          
+          for /f "usebackq delims=" %%F in (`type deploy\_changed_alter.txt`) do (
+            if exist "%%F" (
+              echo.
+              echo [DEPLOY] PROD ALTER: %%~nxF
+              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
+              echo [SUCCESS] %%~nxF
+              set /a DEPLOYED+=1
+            ) else (
+              echo [ERROR] File not found: %%F
+              exit /b 1
+            )
+          )
+          echo Deployed !DEPLOYED! ALTER file(s)
+
+  deploy_drop_prod:
+    needs: [compute_changes, deploy_create_prod, deploy_alter_prod]
+    if: needs.compute_changes.outputs.has_drop == 'true' && needs.compute_changes.outputs.drop_count != '0'
+    runs-on: [self-hosted, Windows]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: prod-changed-sql-lists
+
+      - name: Use sqlcmd
+        run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
+
+      - name: Guard allowlist DROP
+        shell: powershell
+        run: |
+          $allow=Get-Content -ErrorAction SilentlyContinue '.github\drop-allowlist.txt'
+          if(-not $allow){ Write-Host "::warning No drop-allowlist.txt -> all DROP blocked"; exit 1 }
+          if(!(Test-Path 'deploy\_changed_drop.txt')){ Write-Host "No DROP list. Skip."; exit 0 }
+          $rx=[regex]'(?is)\bdrop\s+table\s+(?:\[?(?<s>\w+)\]?\.)?\[?(?<t>\w+)\]?'
+          foreach($f in Get-Content 'deploy\_changed_drop.txt'){
+            if(Test-Path $f){
+              $c=Get-Content $f -Raw
+              foreach($m in $rx.Matches($c)){
+                $s=$m.Groups['s'].Success?$m.Groups['s'].Value:'dbo'
+                $t=$m.Groups['t'].Value
+                $full="$s.$t"
+                if($allow -notcontains $full){
+                  Write-Error "DROP not in allowlist: $full (file $f)"
+                }
+              }
+            }
+          }
+
+      - name: Deploy DROP (changed only)
+        env:
+          H: ${{ secrets.PROD_DB_HOST }}
+          P: ${{ secrets.PROD_DB_PORT }}
+          D: ${{ secrets.PROD_DB_NAME }}
+          U: ${{ secrets.PROD_DB_USER }}
+          W: ${{ secrets.PROD_DB_PASSWORD }}
+        shell: cmd
+        run: |
+          setlocal EnableDelayedExpansion
+          if not exist "deploy\_changed_drop.txt" (
+            echo [ERROR] No changed DROP list. Skipping.
+            exit /b 1
+          )
+          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          set "DEPLOYED=0"
+          
+          for /f "usebackq delims=" %%F in (`type deploy\_changed_drop.txt`) do (
+            if exist "%%F" (
+              echo.
+              echo [DEPLOY] PROD DROP: %%~nxF
+              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
+              echo [SUCCESS] %%~nxF
+              set /a DEPLOYED+=1
+            ) else (
+              echo [ERROR] File not found: %%F
+              exit /b 1
+            )
+          )
+          echo Deployed !DEPLOYED! DROP file(s)
+
+  upload_logs_prod:
+    if: ${{ always() }}
+    needs: [compute_changes, deploy_create_prod, deploy_alter_prod, deploy_drop_prod]
+    runs-on: [self-hosted, Windows]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload deploy logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-deploy-logs
+          path: |
+            deploy_logs_prod/**
+            deploy\__auto_backup_*.sql
+          if-no-files-found: warn
+,''
             
-            # Filter hanya file yang benar-benar ada
-            $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
+            $all=@()
+            if (Test-Path $folder) {
+              $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- $p 2>$null
+              $wt   = git ls-files -mo --exclude-standard -- $p 2>$null
+              if($diff){$all+=$diff}
+              if($wt){$all+=$wt}
+              
+              # Filter hanya file yang benar-benar ada
+              $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
+            } else {
+              Write-Host "[WARN] Folder $folder does not exist"
+            }
             
             if($all.Count -gt 0){
               $all | Set-Content -LiteralPath $o -Encoding UTF8
@@ -131,7 +510,7 @@ jobs:
               }
             }
             else {
-              Write-Host "ℹ️ $($k.ToUpper()): no changes detected"
+              Write-Host "[INFO] $($k.ToUpper()): no changes detected"
               $flags[$k]=$false
               $counts[$k]=0
             }
@@ -228,7 +607,7 @@ jobs:
             Write-Host "::error::File is empty!"
             exit 1
           }
-          Write-Host "✅ Found $($content.Count) file(s)"
+          Write-Host "[OK] Found $($content.Count) file(s)"
 
       - name: Guard disallowed types (CREATE only)
         shell: powershell
@@ -251,14 +630,14 @@ jobs:
             if($legacy){ $legacy|Sort-Object -Unique|ForEach-Object{ " - $_" } }
             exit 1
           }
-          Write-Host '✅ CREATE type guard passed.'
+          Write-Host '[OK] CREATE type guard passed.'
 
       - name: Show files to deploy
         shell: powershell
         run: |
           Write-Host "Files to be deployed to PRODUCTION:"
           Get-Content 'deploy\_changed_create.txt' | ForEach-Object { 
-            Write-Host "  📄 $_"
+            Write-Host "  > $_"
             if (Test-Path $_) {
               $size = (Get-Item $_).Length
               Write-Host "     Size: $size bytes"
@@ -276,7 +655,7 @@ jobs:
         run: |
           setlocal EnableDelayedExpansion
           if not exist "deploy\_changed_create.txt" (
-            echo ❌ No changed CREATE list. Skipping.
+            echo [ERROR] No changed CREATE list. Skipping.
             exit /b 1
           )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
@@ -288,19 +667,19 @@ jobs:
               if exist "%%F" (
                 echo.
                 echo =====================================
-                echo 🚀 PROD CREATE -> %%~nxF
+                echo [DEPLOY] PROD CREATE: %%~nxF
                 echo =====================================
                 "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F"
                 if errorlevel 1 (
-                  echo ❌ FAILED: %%~nxF
+                  echo [FAILED] %%~nxF
                   set /a FAILED+=1
                   exit /b 1
                 ) else (
-                  echo ✅ SUCCESS: %%~nxF
+                  echo [SUCCESS] %%~nxF
                   set /a DEPLOYED+=1
                 )
               ) else (
-                echo ❌ File not found: %%F
+                echo [ERROR] File not found: %%F
                 exit /b 1
               )
             )
@@ -308,14 +687,14 @@ jobs:
           
           echo.
           echo =====================================
-          echo 📊 PROD CREATE Summary
+          echo [SUMMARY] PROD CREATE Deployment
           echo =====================================
           echo Deployed: !DEPLOYED!
           echo Failed: !FAILED!
           echo =====================================
           
           if !DEPLOYED! EQU 0 (
-            echo ⚠️ No files were deployed!
+            echo [WARNING] No files were deployed!
             exit /b 1
           )
 
@@ -354,7 +733,7 @@ jobs:
             if($legacy){ $legacy|Sort-Object -Unique|ForEach-Object{ " - $_" } }
             exit 1
           }
-          Write-Host '✅ ALTER type guard passed.'
+          Write-Host '[OK] ALTER type guard passed.'
 
       - name: Generate & run backup (ALTER)
         shell: powershell
@@ -407,7 +786,7 @@ jobs:
         run: |
           setlocal EnableDelayedExpansion
           if not exist "deploy\_changed_alter.txt" (
-            echo ❌ No changed ALTER list. Skipping.
+            echo [ERROR] No changed ALTER list. Skipping.
             exit /b 1
           )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
@@ -416,12 +795,12 @@ jobs:
           for /f "usebackq delims=" %%F in (`type deploy\_changed_alter.txt`) do (
             if exist "%%F" (
               echo.
-              echo 🚀 PROD ALTER -> %%~nxF
+              echo [DEPLOY] PROD ALTER: %%~nxF
               "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
-              echo ✅ SUCCESS: %%~nxF
+              echo [SUCCESS] %%~nxF
               set /a DEPLOYED+=1
             ) else (
-              echo ❌ File not found: %%F
+              echo [ERROR] File not found: %%F
               exit /b 1
             )
           )
@@ -473,7 +852,7 @@ jobs:
         run: |
           setlocal EnableDelayedExpansion
           if not exist "deploy\_changed_drop.txt" (
-            echo ❌ No changed DROP list. Skipping.
+            echo [ERROR] No changed DROP list. Skipping.
             exit /b 1
           )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
@@ -482,12 +861,12 @@ jobs:
           for /f "usebackq delims=" %%F in (`type deploy\_changed_drop.txt`) do (
             if exist "%%F" (
               echo.
-              echo 🚀 PROD DROP -> %%~nxF
+              echo [DEPLOY] PROD DROP: %%~nxF
               "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
-              echo ✅ SUCCESS: %%~nxF
+              echo [SUCCESS] %%~nxF
               set /a DEPLOYED+=1
             ) else (
-              echo ❌ File not found: %%F
+              echo [ERROR] File not found: %%F
               exit /b 1
             )
           )
