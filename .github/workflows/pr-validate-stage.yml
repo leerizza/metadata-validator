@@ -174,11 +174,39 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: changed-sql-lists
+
       - name: Resolve & check sqlcmd
+        shell: cmd
         run: |
-          echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
-          if not exist "%SQLCMD_EXE%" ( echo sqlcmd missing & exit /b 1 )
-          "%SQLCMD_EXE%" -? >NUL || (echo sqlcmd not executable & exit /b 1)
+          setlocal EnableExtensions EnableDelayedExpansion
+
+          rem 1) Try repo variable first
+          set "SQLCMD_EXE=${{ vars.SQLCMD_EXE }}"
+
+          rem 2) Probe common install paths if not set / not found
+          if not defined SQLCMD_EXE if exist "C:\Program Files\SqlCmd\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
+          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe"
+          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe"
+          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe"
+          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe"
+
+          rem 3) Fallback to PATH
+          if not defined SQLCMD_EXE (
+            for /f "delims=" %%I in ('where sqlcmd 2^>NUL') do if not defined SQLCMD_EXE set "SQLCMD_EXE=%%I"
+          )
+
+          rem 4) Hard fail if still not found
+          if not defined SQLCMD_EXE (
+            echo ❌ sqlcmd.exe not found. Set repository variable SQLCMD_EXE or install SQL tools.
+            exit /b 1
+          )
+
+          rem 5) Verify it runs and export for next steps
+          echo Using sqlcmd: %SQLCMD_EXE%
+          "%SQLCMD_EXE%" -? >NUL || (echo ❌ sqlcmd not executable & exit /b 1)
+          echo SQLCMD_EXE=%SQLCMD_EXE%>>%GITHUB_ENV%
+
+
       - name: Show changed list (CREATE)
         run: |
           if not exist "deploy\_changed_create.txt" ( echo Missing deploy\_changed_create.txt & exit /b 1 )
@@ -213,11 +241,39 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: changed-sql-lists
+
       - name: Resolve & check sqlcmd
+        shell: cmd
         run: |
-          echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
-          if not exist "%SQLCMD_EXE%" ( echo sqlcmd missing & exit /b 1 )
-          "%SQLCMD_EXE%" -? >NUL || (echo sqlcmd not executable & exit /b 1)
+          setlocal EnableExtensions EnableDelayedExpansion
+
+          rem 1) Try repo variable first
+          set "SQLCMD_EXE=${{ vars.SQLCMD_EXE }}"
+
+          rem 2) Probe common install paths if not set / not found
+          if not defined SQLCMD_EXE if exist "C:\Program Files\SqlCmd\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
+          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe"
+          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe"
+          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe"
+          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe"
+
+          rem 3) Fallback to PATH
+          if not defined SQLCMD_EXE (
+            for /f "delims=" %%I in ('where sqlcmd 2^>NUL') do if not defined SQLCMD_EXE set "SQLCMD_EXE=%%I"
+          )
+
+          rem 4) Hard fail if still not found
+          if not defined SQLCMD_EXE (
+            echo ❌ sqlcmd.exe not found. Set repository variable SQLCMD_EXE or install SQL tools.
+            exit /b 1
+          )
+
+          rem 5) Verify it runs and export for next steps
+          echo Using sqlcmd: %SQLCMD_EXE%
+          "%SQLCMD_EXE%" -? >NUL || (echo ❌ sqlcmd not executable & exit /b 1)
+          echo SQLCMD_EXE=%SQLCMD_EXE%>>%GITHUB_ENV%
+
+
       - name: Show changed list (ALTER)
         run: |
           if not exist "deploy\_changed_alter.txt" ( echo Missing deploy\_changed_alter.txt & exit /b 1 )
@@ -252,11 +308,40 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: changed-sql-lists
+
       - name: Resolve & check sqlcmd
+        shell: cmd
         run: |
-          echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
-          if not exist "%SQLCMD_EXE%" ( echo sqlcmd missing & exit /b 1 )
-          "%SQLCMD_EXE%" -? >NUL || (echo sqlcmd not executable & exit /b 1)
+          setlocal EnableExtensions EnableDelayedExpansion
+
+          rem 1) Try repo variable first
+          set "SQLCMD_EXE=${{ vars.SQLCMD_EXE }}"
+
+          rem 2) Probe common install paths if not set / not found
+          if not defined SQLCMD_EXE if exist "C:\Program Files\SqlCmd\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
+          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe"
+          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe"
+          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe"
+          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe"
+
+          rem 3) Fallback to PATH
+          if not defined SQLCMD_EXE (
+            for /f "delims=" %%I in ('where sqlcmd 2^>NUL') do if not defined SQLCMD_EXE set "SQLCMD_EXE=%%I"
+          )
+
+          rem 4) Hard fail if still not found
+          if not defined SQLCMD_EXE (
+            echo ❌ sqlcmd.exe not found. Set repository variable SQLCMD_EXE or install SQL tools.
+            exit /b 1
+          )
+
+          rem 5) Verify it runs and export for next steps
+          echo Using sqlcmd: %SQLCMD_EXE%
+          "%SQLCMD_EXE%" -? >NUL || (echo ❌ sqlcmd not executable & exit /b 1)
+          echo SQLCMD_EXE=%SQLCMD_EXE%>>%GITHUB_ENV%
+
+
+
       - name: Guard allowlist DROP
         shell: powershell
         run: |
