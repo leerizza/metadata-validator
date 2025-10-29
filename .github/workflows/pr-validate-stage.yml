@@ -77,59 +77,32 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
-          
-          try { 
-            git fetch origin --depth=100 2>$null
-            git fetch --all --tags --prune 2>$null 
-          } catch {}
-          
+          try { git fetch origin --depth=100 2>$null; git fetch --all --tags --prune 2>$null } catch {}
           $base='${{ github.base_ref }}'
           if ($base) {
-            Write-Host "PR mode: base=$base"
-            try { 
-              git fetch origin "${base}:refs/remotes/origin/$base" --depth=100 2>$null 
-            } catch {}
+            try { git fetch origin "${base}:refs/remotes/origin/$base" --depth=100 2>$null } catch {}
             $range="origin/$base...HEAD"
           } else {
             $before='${{ github.event.before }}'
-            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { 
-              Write-Host "Using HEAD~1 (no valid before commit)"
-              $range='HEAD~1...HEAD' 
-            } else { 
-              Write-Host "Using before commit: $before"
-              $range="$before...HEAD" 
-            }
+            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { $range='HEAD~1...HEAD' } else { $range="$before...HEAD" }
           }
-          
-          Write-Host "Git diff range (CREATE): $range"
-          Write-Host "Current branch: $(git branch --show-current)"
-          Write-Host "Current HEAD: $(git rev-parse HEAD)"
-          
           $all = @()
           if (Test-Path 'deploy/create') {
             $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/create/*.sql" 2>$null
             $wt   = git ls-files -mo --exclude-standard -- "deploy/create/*.sql" 2>$null
-            if($diff){ $all+=$diff }
-            if($wt){ $all+=$wt }
+            if($diff){ $all+=$diff }; if($wt){ $all+=$wt }
             $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
-          } else {
-            Write-Host "[WARN] Folder deploy/create does not exist"
           }
-          
           Write-Host "Found $($all.Count) CREATE file(s)"
-          
-          $outFile = 'deploy\_changed_create.txt'
+          $outFile = 'deploy/_changed_create.txt'
           if ($all.Count -gt 0) {
             $all | Set-Content -Encoding UTF8 -LiteralPath $outFile
             "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=$($all.Count)" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[OK] CREATE files changed:"
-            $all | ForEach-Object { Write-Host "   - $_" }
           } else {
             "" | Set-Content -Encoding UTF8 -LiteralPath $outFile -NoNewline
             "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[INFO] No CREATE changes detected"
           }
 
       - name: Compute ALTER changes
@@ -138,44 +111,27 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $base='${{ github.base_ref }}'
-          if ($base) { 
-            $range="origin/$base...HEAD" 
-          } else {
+          if ($base) { $range="origin/$base...HEAD" } else {
             $before='${{ github.event.before }}'
-            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { 
-              $range='HEAD~1...HEAD' 
-            } else { 
-              $range="$before...HEAD" 
-            }
+            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { $range='HEAD~1...HEAD' } else { $range="$before...HEAD" }
           }
-          
-          Write-Host "Git diff range (ALTER): $range"
-          
-          $all = @()
+          $all=@()
           if (Test-Path 'deploy/alter') {
             $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/alter/*.sql" 2>$null
             $wt   = git ls-files -mo --exclude-standard -- "deploy/alter/*.sql" 2>$null
-            if($diff){ $all+=$diff }
-            if($wt){ $all+=$wt }
+            if($diff){ $all+=$diff }; if($wt){ $all+=$wt }
             $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
-          } else {
-            Write-Host "[WARN] Folder deploy/alter does not exist"
           }
-          
           Write-Host "Found $($all.Count) ALTER file(s)"
-          
-          $outFile = 'deploy\_changed_alter.txt'
+          $outFile = 'deploy/_changed_alter.txt'
           if ($all.Count -gt 0) {
             $all | Set-Content -Encoding UTF8 -LiteralPath $outFile
             "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=$($all.Count)" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[OK] ALTER files changed:"
-            $all | ForEach-Object { Write-Host "   - $_" }
           } else {
             "" | Set-Content -Encoding UTF8 -LiteralPath $outFile -NoNewline
             "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[INFO] No ALTER changes detected"
           }
 
       - name: Compute DROP changes
@@ -184,44 +140,27 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $base='${{ github.base_ref }}'
-          if ($base) { 
-            $range="origin/$base...HEAD" 
-          } else {
+          if ($base) { $range="origin/$base...HEAD" } else {
             $before='${{ github.event.before }}'
-            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { 
-              $range='HEAD~1...HEAD' 
-            } else { 
-              $range="$before...HEAD" 
-            }
+            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { $range='HEAD~1...HEAD' } else { $range="$before...HEAD" }
           }
-          
-          Write-Host "Git diff range (DROP): $range"
-          
-          $all = @()
+          $all=@()
           if (Test-Path 'deploy/drop') {
             $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/drop/*.sql" 2>$null
             $wt   = git ls-files -mo --exclude-standard -- "deploy/drop/*.sql" 2>$null
-            if($diff){ $all+=$diff }
-            if($wt){ $all+=$wt }
+            if($diff){ $all+=$diff }; if($wt){ $all+=$wt }
             $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
-          } else {
-            Write-Host "[WARN] Folder deploy/drop does not exist"
           }
-          
           Write-Host "Found $($all.Count) DROP file(s)"
-          
-          $outFile = 'deploy\_changed_drop.txt'
+          $outFile = 'deploy/_changed_drop.txt'
           if ($all.Count -gt 0) {
             $all | Set-Content -Encoding UTF8 -LiteralPath $outFile
             "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=$($all.Count)" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[OK] DROP files changed:"
-            $all | ForEach-Object { Write-Host "   - $_" }
           } else {
             "" | Set-Content -Encoding UTF8 -LiteralPath $outFile -NoNewline
             "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[INFO] No DROP changes detected"
           }
 
       - name: Upload change lists
@@ -230,8 +169,9 @@ jobs:
         with:
           name: changed-sql-lists
           path: |
-            deploy\_changed_*.txt
-          if-no-files-found: ignore
+            deploy/_changed_*.txt
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Summary
         if: always()
@@ -258,6 +198,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: changed-sql-lists
+          path: .
+          merge-multiple: true
 
       - name: Resolve & check sqlcmd
         shell: cmd
@@ -283,22 +225,22 @@ jobs:
       - name: Verify change list exists
         shell: powershell
         run: |
-          Write-Host "Checking for deploy\_changed_create.txt..."
+          Write-Host "Checking for deploy/_changed_create.txt..."
           Write-Host "Current directory: $(Get-Location)"
           Write-Host "Available files in current directory:"
           Get-ChildItem | Select-Object Name, Length | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
           
-          if (!(Test-Path 'deploy\_changed_create.txt')) {
-            Write-Host "::error::File deploy\_changed_create.txt not found after artifact download!"
+          if (!(Test-Path 'deploy/_changed_create.txt')) {
+            Write-Host "::error::File deploy/_changed_create.txt not found after artifact download!"
             Write-Host "This is a workflow bug - the file should have been created in setup job."
             exit 1
           }
           
-          $content = Get-Content 'deploy\_changed_create.txt' -Raw -ErrorAction SilentlyContinue
+          $content = Get-Content 'deploy/_changed_create.txt' -Raw -ErrorAction SilentlyContinue
           Write-Host "File content length: $($content.Length) chars"
           
           if ([string]::IsNullOrWhiteSpace($content)) {
-            Write-Host "::error::File deploy\_changed_create.txt is empty!"
+            Write-Host "::error::File deploy/_changed_create.txt is empty!"
             Write-Host "This means no CREATE files were detected as changed in the setup job."
             Write-Host "This job should not have run. Check the job conditions."
             exit 1
@@ -312,7 +254,7 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Files to be deployed:"
-          Get-Content 'deploy\_changed_create.txt' | ForEach-Object { 
+          Get-Content 'deploy/_changed_create.txt' | ForEach-Object { 
             Write-Host "  > $_"
             if (Test-Path $_) {
               $size = (Get-Item $_).Length
@@ -335,14 +277,20 @@ jobs:
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
           
           if not exist "deploy\_changed_create.txt" (
+            rem keep legacy check (no-op); real file is below
+          )
+          if not exist "deploy\_changed_create.txt" if not exist "deploy/_changed_create.txt" (
             echo [ERROR] No changed CREATE list found. Skipping.
             exit /b 1
           )
           
+          set "LIST=deploy/_changed_create.txt"
+          if not exist "!LIST!" set "LIST=deploy\_changed_create.txt"
+
           set "DEPLOYED=0"
           set "FAILED=0"
           
-          for /f "usebackq delims=" %%F in (`type deploy\_changed_create.txt`) do (
+          for /f "usebackq delims=" %%F in (`type "!LIST!"`) do (
             if not "%%F"=="" (
               if exist "%%F" (
                 echo.
@@ -390,6 +338,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: changed-sql-lists
+          path: .
+          merge-multiple: true
 
       - name: Resolve & check sqlcmd
         shell: cmd
@@ -415,9 +365,9 @@ jobs:
       - name: Show changed list (ALTER)
         shell: cmd
         run: |
-          if not exist "deploy\_changed_alter.txt" ( echo [ERROR] Missing file & exit /b 1 )
+          if not exist "deploy/_changed_alter.txt" ( echo [ERROR] Missing file & exit /b 1 )
           echo Files to deploy:
-          type deploy\_changed_alter.txt
+          type deploy/_changed_alter.txt
 
       - name: Deploy ALTER (changed only)
         env:
@@ -432,7 +382,7 @@ jobs:
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
           set "DEPLOYED=0"
           
-          for /f "usebackq delims=" %%F in (`type deploy\_changed_alter.txt`) do (
+          for /f "usebackq delims=" %%F in (`type deploy/_changed_alter.txt`) do (
             if exist "%%F" (
               echo.
               echo [DEPLOY] ALTER: %%~nxF
@@ -458,6 +408,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: changed-sql-lists
+          path: .
+          merge-multiple: true
 
       - name: Resolve & check sqlcmd
         shell: cmd
@@ -486,7 +438,7 @@ jobs:
           $allow=Get-Content -ErrorAction SilentlyContinue '.github\drop-allowlist.txt'
           if(-not $allow){Write-Host "::warning No drop-allowlist.txt -> all DROP blocked";exit 1}
           $rx=[regex]'(?is)\bdrop\s+table\s+(?:\[?(?<s>\w+)\]?\.)?\[?(?<t>\w+)\]?'
-          foreach($f in Get-Content 'deploy\_changed_drop.txt'){
+          foreach($f in Get-Content 'deploy/_changed_drop.txt'){
             $c=Get-Content $f -Raw
             foreach($m in $rx.Matches($c)){
               $s=$m.Groups['s'].Success?$m.Groups['s'].Value:'dbo'
@@ -499,8 +451,8 @@ jobs:
       - name: Show changed list (DROP)
         shell: cmd
         run: |
-          if not exist "deploy\_changed_drop.txt" ( echo [ERROR] Missing file & exit /b 1 )
-          type deploy\_changed_drop.txt
+          if not exist "deploy/_changed_drop.txt" ( echo [ERROR] Missing file & exit /b 1 )
+          type deploy/_changed_drop.txt
 
       - name: Deploy DROP (changed only)
         env:
@@ -515,7 +467,7 @@ jobs:
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
           set "DEPLOYED=0"
           
-          for /f "usebackq delims=" %%F in (`type deploy\_changed_drop.txt`) do (
+          for /f "usebackq delims=" %%F in (`type deploy/_changed_drop.txt`) do (
             if exist "%%F" (
               echo.
               echo [DEPLOY] DROP: %%~nxF
