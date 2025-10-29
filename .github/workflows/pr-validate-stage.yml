@@ -20,7 +20,7 @@ jobs:
     outputs:
       create_changed: ${{ steps.chg_create.outputs.has_changes }}
       create_count:   ${{ steps.chg_create.outputs.file_count }}
-      alter_changed:  $steps.chg_alter.outputs.has_changes }}
+      alter_changed:  ${{ steps.chg_alter.outputs.has_changes }}
       alter_count:    ${{ steps.chg_alter.outputs.file_count }}
       drop_changed:   ${{ steps.chg_drop.outputs.has_changes }}
       drop_count:     ${{ steps.chg_drop.outputs.file_count }}
