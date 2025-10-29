@@ -121,7 +121,7 @@ jobs:
               $all | Set-Content -LiteralPath $o -Encoding UTF8
               $flags[$k]=$true
               $counts[$k]=$all.Count
-              Write-Host "✅ $($k.ToUpper()) changed ($($all.Count) files):"
+              Write-Host "[OK] $($k.ToUpper()) changed ($($all.Count) files):"
               $all | ForEach-Object { 
                 Write-Host "   - $_" 
                 if (Test-Path $_) {
