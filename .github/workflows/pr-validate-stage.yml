@@ -146,45 +146,37 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $base='${{ github.base_ref }}'
-          if ($base) { 
-            $range="origin/$base...HEAD" 
-          } else {
+          if ($base) { $range="origin/$base...HEAD" } else {
             $before='${{ github.event.before }}'
-            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { 
-              $range='HEAD~1...HEAD' 
-            } else { 
-              $range="$before...HEAD" 
-            }
+            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { $range='HEAD~1...HEAD' } else { $range="$before...HEAD" }
           }
-          
+
           Write-Host "Git diff range (ALTER): $range"
-          
+
           $all = @()
           if (Test-Path 'deploy/alter') {
-            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/alter/*.sql" 2>$null
-            $wt   = git ls-files -mo --exclude-standard -- "deploy/alter/*.sql" 2>$null
+            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/alter/**/*.sql" 2>$null
+            $wt   = git ls-files -mo --exclude-standard -- "deploy/alter/**/*.sql" 2>$null
             if($diff){ $all+=$diff }
             if($wt){ $all+=$wt }
             $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
           } else {
             Write-Host "[WARN] Folder deploy/alter does not exist"
           }
-          
+
           Write-Host "Found $($all.Count) ALTER file(s)"
-          
+
           $outFile = '_changed_alter.txt'
           if ($all.Count -gt 0) {
             $all | Set-Content -Encoding UTF8 -LiteralPath $outFile
-            "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
+            "has_changes=true"       | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=$($all.Count)" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[OK] ALTER files changed:"
-            $all | ForEach-Object { Write-Host "   - $_" }
           } else {
             "" | Set-Content -Encoding UTF8 -LiteralPath $outFile -NoNewline
-            "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
-            "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[INFO] No ALTER changes detected"
+            "has_changes=false"      | Out-File $env:GITHUB_OUTPUT -Append
+            "file_count=0"           | Out-File $env:GITHUB_OUTPUT -Append
           }
+
 
       - name: Compute DROP changes
         id: chg_drop
