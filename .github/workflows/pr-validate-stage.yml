@@ -118,7 +118,7 @@ jobs:
           
           Write-Host "Found $($all.Count) CREATE file(s)"
           
-          $outFile = 'deploy\_changed_create.txt'
+          $outFile = '_changed_create.txt'
           if ($all.Count -gt 0) {
             $all | Set-Content -Encoding UTF8 -LiteralPath $outFile
             "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append

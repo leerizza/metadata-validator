@@ -1,1 +1,25 @@
+# Workflow temporary files
+_changed_*.txt
 deploy/_changed_*.txt
+deploy/__auto_backup_*.sql
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
