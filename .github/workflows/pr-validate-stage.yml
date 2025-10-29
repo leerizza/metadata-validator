@@ -211,8 +211,13 @@ jobs:
 
 
       - name: Show changed list (CREATE)
+        shell: powershell
         run: |
-          if exist "deploy\_changed_create.txt" ( type deploy\_changed_create.txt ) else ( echo (list missing) )
+          if (Test-Path 'deploy\_changed_create.txt') {
+            Get-Content 'deploy\_changed_create.txt' | ForEach-Object { Write-Host $_ }
+          } else {
+            Write-Host '(list missing)'
+          }
 
 
       - name: Deploy CREATE (changed only)
