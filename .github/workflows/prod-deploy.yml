@@ -30,13 +30,14 @@ jobs:
 
       - name: Resolve sqlcmd
         shell: powershell
-        env: { VAR_SQLCMD: ${{ vars.SQLCMD_EXE }} }
+        env:
+          VAR_SQLCMD: ${{ vars.SQLCMD_EXE }}
         run: |
           $ErrorActionPreference='Stop'
           function Exists($p){ if([string]::IsNullOrWhiteSpace($p)){return $false}; Test-Path $p }
           $c=@()
           if($env:VAR_SQLCMD){ $c+=$env:VAR_SQLCMD }
-          try { $found=& where.exe sqlcmd 2>$null; if($LASTEXITCODE -eq 0){ $c+=($found -split "`r?`n" | ? { $_ -and (Test-Path $_) }) } } catch {}
+          try{ $found=& where.exe sqlcmd 2>$null; if($LASTEXITCODE -eq 0){ $c+=($found -split "`r?`n" | ? { $_ -and (Test-Path $_) }) } }catch{}
           $c+=@(
             "C:\Program Files\SqlCmd\sqlcmd.exe",
             "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe",
@@ -76,8 +77,6 @@ jobs:
           $ErrorActionPreference='Stop'
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
           try { git fetch --all --tags --prune 2>$null } catch {}
-          # Karena manual, asumsikan run di default branch (mis. master/main)
-          # Range default: HEAD~1...HEAD (commit terakhir vs sebelumnya)
           $range='HEAD~1...HEAD'
           $lists=@{
             create = @{ pattern = "deploy/create/*.sql"; out="deploy\_changed_create.txt" };
@@ -127,7 +126,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: prod-changed-sql-lists }
+        with:
+          name: prod-changed-sql-lists
 
       - name: Use sqlcmd
         run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
@@ -164,7 +164,7 @@ jobs:
           W: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
           if not exist "deploy\_changed_create.txt" (
-            echo ⚠️ No changed CREATE list. Skipping.
+            echo No changed CREATE list. Skipping.
             exit /b 0
           )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
@@ -183,7 +183,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: prod-changed-sql-lists }
+        with:
+          name: prod-changed-sql-lists
 
       - name: Use sqlcmd
         run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
@@ -260,7 +261,7 @@ jobs:
           W: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
           if not exist "deploy\_changed_alter.txt" (
-            echo ⚠️ No changed ALTER list. Skipping.
+            echo No changed ALTER list. Skipping.
             exit /b 0
           )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
@@ -279,7 +280,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: prod-changed-sql-lists }
+        with:
+          name: prod-changed-sql-lists
 
       - name: Use sqlcmd
         run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
@@ -314,7 +316,7 @@ jobs:
           W: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
           if not exist "deploy\_changed_drop.txt" (
-            echo ⚠️ No changed DROP list. Skipping.
+            echo No changed DROP list. Skipping.
             exit /b 0
           )
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
@@ -326,7 +328,7 @@ jobs:
           )
 
   upload_logs_prod:
-    if: always()
+    if: ${{ always() }}
     needs: [compute_changes, deploy_create_prod, deploy_alter_prod, deploy_drop_prod]
     runs-on: [self-hosted, Windows]
     steps:
