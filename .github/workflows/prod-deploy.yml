@@ -37,7 +37,7 @@ jobs:
           function Exists($p){ if([string]::IsNullOrWhiteSpace($p)){return $false}; Test-Path $p }
           $c=@()
           if($env:VAR_SQLCMD){ $c+=$env:VAR_SQLCMD }
-          try{ $found=& where.exe sqlcmd 2>$null; if($LASTEXITCODE -eq 0){ $c+=($found -split "`r?`n" | ? { $_ -and (Test-Path $_) }) } }catch{}
+          try{ $found=& where.exe sqlcmd 2>$null; if($LASTEXITCODE -eq 0){ $c+=($found -split "`r?`n" | Where-Object { $_ -and (Test-Path $_) }) } }catch{}
           $c+=@(
             "C:\Program Files\SqlCmd\sqlcmd.exe",
             "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe",
@@ -45,7 +45,7 @@ jobs:
             "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe",
             "C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe"
           )
-          $pick=$c|?{Exists $_}|Select-Object -First 1
+          $pick=$c|Where-Object { Exists $_ } | Select-Object -First 1
           if(-not $pick){ throw "sqlcmd.exe not found. Set repo variable SQLCMD_EXE or install SQL tools." }
           "SQLCMD_EXE=$pick" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
           Write-Host "Using sqlcmd: $pick"
@@ -78,21 +78,32 @@ jobs:
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
           try { git fetch --all --tags --prune 2>$null } catch {}
           $range='HEAD~1...HEAD'
+
           $lists=@{
             create = @{ pattern = "deploy/create/*.sql"; out="deploy\_changed_create.txt" };
             alter  = @{ pattern = "deploy/alter/*.sql";  out="deploy\_changed_alter.txt"  };
             drop   = @{ pattern = "deploy/drop/*.sql";   out="deploy\_changed_drop.txt"   };
           }
+
           $flags=@{ create=$false; alter=$false; drop=$false }
+
           foreach($k in $lists.Keys){
             $p=$lists[$k].pattern
             $o=$lists[$k].out
             $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- $p
             $wt   = git ls-files -mo --exclude-standard -- $p
             $all=@(); if($diff){$all+=$diff}; if($wt){$all+=$wt}; $all=$all|Sort-Object -Unique
-            if($all.Count -gt 0){ $all|Set-Content -LiteralPath $o -Encoding UTF8; $flags[$k]=$true; Write-Host "$k changed:"; $all|%{" - $_"} }
-            else { Write-Host "$k: no changes" }
+            if($all.Count -gt 0){
+              $all|Set-Content -LiteralPath $o -Encoding UTF8
+              $flags[$k]=$true
+              Write-Host "$($k) changed:"
+              $all | ForEach-Object { " - $_" }
+            }
+            else {
+              Write-Host "$($k): no changes"
+            }
           }
+
           if(-not ($flags.create -or $flags.alter -or $flags.drop)){
             Write-Host "::notice title=No changed SQL::Nothing to deploy."
           }
@@ -102,9 +113,9 @@ jobs:
         shell: powershell
         run: |
           function HasList($f){ Test-Path $f -PathType Leaf -ErrorAction SilentlyContinue }
-          $hasCreate = (HasList 'deploy\_changed_create.txt') ? 'true' : 'false'
-          $hasAlter  = (HasList 'deploy\_changed_alter.txt')  ? 'true' : 'false'
-          $hasDrop   = (HasList 'deploy\_changed_drop.txt')   ? 'true' : 'false'
+          $hasCreate = 'false'; if(HasList 'deploy\_changed_create.txt'){ $hasCreate='true' }
+          $hasAlter  = 'false'; if(HasList 'deploy\_changed_alter.txt'){  $hasAlter='true'  }
+          $hasDrop   = 'false'; if(HasList 'deploy\_changed_drop.txt'){   $hasDrop='true'   }
           "has_create=$hasCreate" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "has_alter=$hasAlter"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "has_drop=$hasDrop"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
@@ -149,8 +160,8 @@ jobs:
           }
           if($bad -or $legacy){
             Write-Host '❌ Disallowed in CREATE:'
-            if($bad){ $bad|Sort-Object -Unique|%{" - $_"} }
-            if($legacy){ $legacy|Sort-Object -Unique|%{" - $_"} }
+            if($bad){ $bad|Sort-Object -Unique|ForEach-Object{ " - $_" } }
+            if($legacy){ $legacy|Sort-Object -Unique|ForEach-Object{ " - $_" } }
             exit 1
           }
           Write-Host '✅ CREATE type guard passed.'
@@ -206,8 +217,8 @@ jobs:
           }
           if($bad -or $legacy){
             Write-Host '❌ Disallowed in ALTER:'
-            if($bad){ $bad|Sort-Object -Unique|%{" - $_"} }
-            if($legacy){ $legacy|Sort-Object -Unique|%{" - $_"} }
+            if($bad){ $bad|Sort-Object -Unique|ForEach-Object{ " - $_" } }
+            if($legacy){ $legacy|Sort-Object -Unique|ForEach-Object{ " - $_" } }
             exit 1
           }
           Write-Host '✅ ALTER type guard passed.'
@@ -238,7 +249,7 @@ jobs:
             }
           }
           $pairs=$pairs|Sort-Object -Unique
-          if(!$pairs){ Write-Host "No ALTER target tables. Skip backup."; exit 0 }
+          if(-not $pairs){ Write-Host "No ALTER target tables. Skip backup."; exit 0 }
           $sb=New-Object Text.StringBuilder
           foreach($qn in $pairs){
             $schema,$table=$qn.Split('.')
