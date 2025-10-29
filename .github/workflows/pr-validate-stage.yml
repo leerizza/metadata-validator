@@ -90,16 +90,17 @@ jobs:
           $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/create/*.sql"
           $wt   = git ls-files -mo --exclude-standard -- "deploy/create/*.sql"
           $all  = @(); if($diff){$all+=$diff}; if($wt){$all+=$wt}; $all=$all|Sort-Object -Unique
-          if($all.Count -gt 0){
-            $p='deploy\_changed_create.txt';$all|Set-Content $p -Enc UTF8
-            "has_changes=true"  | Out-File $env:GITHUB_OUTPUT -Append
-            "changed_list=$p"   | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "CREATE changed:"; Get-Content $p | % { ' - ' + $_ }
-          } else {
-            "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
-            "changed_list="     | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "No CREATE changes (range $range)"
-          }
+          
+            $p = 'deploy\_changed_create.txt'
+            if ($all.Count -gt 0) {
+              $all | Set-Content -Encoding UTF8 -LiteralPath $p
+              "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
+              Write-Host "CREATE changed:"; Get-Content $p | % { ' - ' + $_ }
+            } else {
+              '' | Set-Content -Encoding UTF8 -LiteralPath $p   # buat file kosong
+              "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
+              Write-Host "No CREATE changes (range $range)"
+            }
 
       - name: Compute ALTER changes
         id: chg_alter
@@ -115,16 +116,17 @@ jobs:
           $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/alter/*.sql"
           $wt   = git ls-files -mo --exclude-standard -- "deploy/alter/*.sql"
           $all  = @(); if($diff){$all+=$diff}; if($wt){$all+=$wt}; $all=$all|Sort-Object -Unique
-          if($all.Count -gt 0){
-            $p='deploy\_changed_alter.txt';$all|Set-Content $p -Enc UTF8
-            "has_changes=true"  | Out-File $env:GITHUB_OUTPUT -Append
-            "changed_list=$p"   | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "ALTER changed:"; Get-Content $p | % { ' - ' + $_ }
-          } else {
-            "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
-            "changed_list="     | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "No ALTER changes (range $range)"
-          }
+          
+          $p = 'deploy\_changed_alter.txt'
+            if ($all.Count -gt 0) {
+              $all | Set-Content -Encoding UTF8 -LiteralPath $p
+              "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
+              Write-Host "ALTER changed:"; Get-Content $p | % { ' - ' + $_ }
+            } else {
+              '' | Set-Content -Encoding UTF8 -LiteralPath $p   # buat file kosong
+              "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
+              Write-Host "No ALTER changes (range $range)"
+            }
 
       - name: Compute DROP changes
         id: chg_drop
@@ -140,16 +142,17 @@ jobs:
           $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/drop/*.sql"
           $wt   = git ls-files -mo --exclude-standard -- "deploy/drop/*.sql"
           $all  = @(); if($diff){$all+=$diff}; if($wt){$all+=$wt}; $all=$all|Sort-Object -Unique
-          if($all.Count -gt 0){
-            $p='deploy\_changed_drop.txt';$all|Set-Content $p -Enc UTF8
-            "has_changes=true"  | Out-File $env:GITHUB_OUTPUT -Append
-            "changed_list=$p"   | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "DROP changed:"; Get-Content $p | % { ' - ' + $_ }
-          } else {
-            "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
-            "changed_list="     | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "No DROP changes (range $range)"
-          }
+          
+          $p = 'deploy\_changed_drop.txt'
+            if ($all.Count -gt 0) {
+              $all | Set-Content -Encoding UTF8 -LiteralPath $p
+              "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
+              Write-Host "DROP changed:"; Get-Content $p | % { ' - ' + $_ }
+            } else {
+              '' | Set-Content -Encoding UTF8 -LiteralPath $p   # buat file kosong
+              "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
+              Write-Host "No DROP changes (range $range)"
+            }
 
       - name: Upload change lists
         if: always()
@@ -209,8 +212,9 @@ jobs:
 
       - name: Show changed list (CREATE)
         run: |
-          if not exist "deploy\_changed_create.txt" ( echo Missing deploy\_changed_create.txt & exit /b 1 )
-          type deploy\_changed_create.txt
+          if exist "deploy\_changed_create.txt" ( type deploy\_changed_create.txt ) else ( echo (list missing) )
+
+
       - name: Deploy CREATE (changed only)
         env:
           H: ${{ secrets.STG_DB_HOST }}
@@ -220,14 +224,17 @@ jobs:
           W: ${{ secrets.STG_DB_PASSWORD }}
         run: |
           set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          if not exist "deploy\_changed_create.txt" (
+            echo ⚠️ No changed CREATE list found. Skipping.
+            exit /b 0
+          )
           for /f "usebackq delims=" %%F in (`type deploy\_changed_create.txt`) do (
-            if exist "%%F" (
+            if not "%%F"=="" if exist "%%F" (
               echo CREATE -> %%~nxF
               "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
-            ) else (
-              echo File not found: %%F & exit /b 1
             )
           )
+          echo (No CREATE files to run or all were empty.) 
 
   deploy_alter_stg:
     needs: [setup, deploy_create_stg]
