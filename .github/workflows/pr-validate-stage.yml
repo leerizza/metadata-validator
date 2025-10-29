@@ -233,7 +233,7 @@ jobs:
           echo SQLCMD_EXE=%SQLCMD_EXE%>>%GITHUB_ENV%
 
       - name: Resolve change-list paths (CREATE/ALTER/DROP)
-        shell: pwsh
+        shell: powershell
         run: |
           $pairs = @(
             @{ key="CREATE"; deploy="deploy/_changed_create.txt"; root="_changed_create.txt" },
@@ -373,7 +373,7 @@ jobs:
           echo SQLCMD_EXE=%SQLCMD_EXE%>>%GITHUB_ENV%
 
       - name: Resolve change-list paths (CREATE/ALTER/DROP)
-        shell: pwsh
+        shell: powershell
         run: |
           $pairs = @(
             @{ key="CREATE"; deploy="deploy/_changed_create.txt"; root="_changed_create.txt" },
@@ -463,7 +463,7 @@ jobs:
           echo SQLCMD_EXE=%SQLCMD_EXE%>>%GITHUB_ENV%
 
       - name: Resolve change-list paths (CREATE/ALTER/DROP)
-        shell: pwsh
+        shell: powershell
         run: |
           $pairs = @(
             @{ key="CREATE"; deploy="deploy/_changed_create.txt"; root="_changed_create.txt" },
