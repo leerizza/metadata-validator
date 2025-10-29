@@ -20,7 +20,7 @@ jobs:
     outputs:
       create_changed: ${{ steps.chg_create.outputs.has_changes }}
       create_count:   ${{ steps.chg_create.outputs.file_count }}
-      alter_changed:  ${{ steps.chg_alter.outputs.has_changes }}
+      alter_changed:  $steps.chg_alter.outputs.has_changes }}
       alter_count:    ${{ steps.chg_alter.outputs.file_count }}
       drop_changed:   ${{ steps.chg_drop.outputs.has_changes }}
       drop_count:     ${{ steps.chg_drop.outputs.file_count }}
@@ -125,6 +125,14 @@ jobs:
             "file_count=$($all.Count)" | Out-File $env:GITHUB_OUTPUT -Append
             Write-Host "[OK] CREATE files changed:"
             $all | ForEach-Object { Write-Host "   - $_" }
+            
+            # DEBUG: Simpan juga absolute path untuk debugging
+            $absolutePaths = $all | ForEach-Object { 
+              $fullPath = (Resolve-Path $_).Path
+              Write-Host "Absolute path: $fullPath"
+              $fullPath
+            }
+            $absolutePaths | Set-Content -Encoding UTF8 -LiteralPath '_changed_create_absolute.txt'
           } else {
             "" | Set-Content -Encoding UTF8 -LiteralPath $outFile -NoNewline
             "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
@@ -255,9 +263,40 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          
       - uses: actions/download-artifact@v4
         with:
           name: changed-sql-lists
+          path: ./
+
+      - name: Debug workspace structure
+        shell: powershell
+        run: |
+          Write-Host "=== WORKSPACE STRUCTURE ==="
+          Get-ChildItem -Recurse | Where-Object { $_.Name -like "*create*" -or $_.Name -like "*stg_test*" } | 
+            Select-Object FullName, Length, LastWriteTime | 
+            Format-Table -AutoSize
+          
+          Write-Host "=== CHANGED FILES LIST ==="
+          if (Test-Path '_changed_create.txt') {
+            $files = Get-Content '_changed_create.txt'
+            Write-Host "Files in _changed_create.txt:"
+            foreach ($file in $files) {
+              Write-Host "  - $file"
+              if (Test-Path $file) {
+                Write-Host "    [FOUND] Size: $((Get-Item $file).Length) bytes"
+              } else {
+                Write-Host "    [NOT FOUND]"
+                # Coba cari file dengan pattern
+                $found = Get-ChildItem -Recurse -Filter (Split-Path $file -Leaf) | Select-Object -First 1
+                if ($found) {
+                  Write-Host "    [FOUND SIMILAR] At: $($found.FullName)"
+                }
+              }
+            }
+          } else {
+            Write-Host "File _changed_create.txt not found"
+          }
 
       - name: Resolve & check sqlcmd
         shell: cmd
@@ -308,76 +347,94 @@ jobs:
           Write-Host "[OK] Found $($lines.Count) file(s) to deploy:"
           $lines | ForEach-Object { Write-Host "  - $($_.Trim())" }
 
-      - name: Show changed list (CREATE)
-        shell: powershell
-        run: |
-          Write-Host "Files to be deployed:"
-          Get-Content '_changed_create.txt' | ForEach-Object { 
-            Write-Host "  > $_"
-            if (Test-Path $_) {
-              $size = (Get-Item $_).Length
-              Write-Host "    Size: $size bytes"
-            } else {
-              Write-Host "    [WARNING] File not found in workspace!"
-            }
-          }
-
-      - name: Deploy CREATE (changed only)
+      - name: Deploy CREATE (changed only) - FIXED VERSION
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
           D: ${{ secrets.STG_DB_NAME }}
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
-        shell: cmd
+        shell: powershell
         run: |
-          setlocal EnableDelayedExpansion
-          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
+          $ErrorActionPreference = 'Stop'
           
-          if not exist "_changed_create.txt" (
-            echo [ERROR] No changed CREATE list found. Skipping.
-            exit /b 1
-          )
+          $PORT = $env:P
+          if ([string]::IsNullOrWhiteSpace($PORT)) { $PORT = "1433" }
           
-          set "DEPLOYED=0"
-          set "FAILED=0"
+          if (!(Test-Path '_changed_create.txt')) {
+            Write-Error "No changed CREATE list found. Skipping."
+            exit 1
+          }
           
-          for /f "usebackq delims=" %%F in (`type _changed_create.txt`) do (
-            if not "%%F"=="" (
-              if exist "%%F" (
-                echo.
-                echo =====================================
-                echo [DEPLOY] CREATE: %%~nxF
-                echo =====================================
-                "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F"
-                if errorlevel 1 (
-                  echo [FAILED] %%~nxF
-                  set /a FAILED+=1
-                  exit /b 1
-                ) else (
-                  echo [SUCCESS] %%~nxF
-                  set /a DEPLOYED+=1
-                )
-              ) else (
-                echo [ERROR] File not found: %%F
-                exit /b 1
+          $files = Get-Content '_changed_create.txt' | Where-Object { $_.Trim() }
+          if ($files.Count -eq 0) {
+            Write-Error "No files found in _changed_create.txt"
+            exit 1
+          }
+          
+          $DEPLOYED = 0
+          $FAILED = 0
+          
+          foreach ($file in $files) {
+            $trimmedFile = $file.Trim()
+            if ([string]::IsNullOrWhiteSpace($trimmedFile)) { continue }
+            
+            Write-Host ""
+            Write-Host "====================================="
+            Write-Host "[DEPLOY] CREATE: $trimmedFile"
+            Write-Host "====================================="
+            
+            # Check if file exists with case sensitivity
+            if (Test-Path $trimmedFile) {
+              $fullPath = Resolve-Path $trimmedFile
+              Write-Host "File found at: $fullPath"
+              
+              # Deploy using sqlcmd
+              $sqlcmdArgs = @(
+                "-S", "$env:H,$PORT",
+                "-d", "$env:D", 
+                "-U", "$env:U",
+                "-P", "$env:W",
+                "-b", "-C",
+                "-i", "`"$fullPath`""
               )
-            )
-          )
+              
+              $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
+              
+              if ($process.ExitCode -eq 0) {
+                Write-Host "[SUCCESS] $trimmedFile"
+                $DEPLOYED++
+              } else {
+                Write-Host "[FAILED] $trimmedFile - Exit code: $($process.ExitCode)"
+                $FAILED++
+                exit 1
+              }
+            } else {
+              Write-Host "[ERROR] File not found: $trimmedFile"
+              Write-Host "Searching for similar files..."
+              $similar = Get-ChildItem -Recurse -Filter (Split-Path $trimmedFile -Leaf) | Select-Object -First 1
+              if ($similar) {
+                Write-Host "Found similar file at: $($similar.FullName)"
+              }
+              $FAILED++
+              exit 1
+            }
+          }
           
-          echo.
-          echo =====================================
-          echo [SUMMARY] CREATE Deployment
-          echo =====================================
-          echo Deployed: !DEPLOYED!
-          echo Failed: !FAILED!
-          echo =====================================
+          Write-Host ""
+          Write-Host "====================================="
+          Write-Host "[SUMMARY] CREATE Deployment"
+          Write-Host "====================================="
+          Write-Host "Deployed: $DEPLOYED"
+          Write-Host "Failed: $FAILED"
+          Write-Host "====================================="
           
-          if !DEPLOYED! EQU 0 (
-            echo [WARNING] No files were deployed!
-            exit /b 1
-          )
+          if ($DEPLOYED -eq 0) {
+            Write-Error "No files were deployed!"
+            exit 1
+          }
 
+  # Jobs deploy_alter_stg dan deploy_drop_stg tetap sama...
   deploy_alter_stg:
     needs: [setup, deploy_create_stg]
     if: needs.setup.outputs.alter_changed == 'true' && needs.setup.outputs.alter_count != '0'
@@ -390,6 +447,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: changed-sql-lists
+          path: ./
 
       - name: Resolve & check sqlcmd
         shell: cmd
@@ -426,25 +484,45 @@ jobs:
           D: ${{ secrets.STG_DB_NAME }}
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
-        shell: cmd
+        shell: powershell
         run: |
-          setlocal EnableDelayedExpansion
-          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
-          set "DEPLOYED=0"
+          $ErrorActionPreference = 'Stop'
+          $PORT = $env:P
+          if ([string]::IsNullOrWhiteSpace($PORT)) { $PORT = "1433" }
+          $DEPLOYED = 0
           
-          for /f "usebackq delims=" %%F in (`type _changed_alter.txt`) do (
-            if exist "%%F" (
-              echo.
-              echo [DEPLOY] ALTER: %%~nxF
-              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
-              echo [SUCCESS] %%~nxF
-              set /a DEPLOYED+=1
-            ) else (
-              echo [ERROR] File not found: %%F
-              exit /b 1
-            )
-          )
-          echo Deployed !DEPLOYED! ALTER file(s)
+          $files = Get-Content '_changed_alter.txt' | Where-Object { $_.Trim() }
+          foreach ($file in $files) {
+            $trimmedFile = $file.Trim()
+            if (Test-Path $trimmedFile) {
+              Write-Host ""
+              Write-Host "[DEPLOY] ALTER: $trimmedFile"
+              $fullPath = Resolve-Path $trimmedFile
+              
+              $sqlcmdArgs = @(
+                "-S", "$env:H,$PORT",
+                "-d", "$env:D", 
+                "-U", "$env:U",
+                "-P", "$env:W",
+                "-b", "-C",
+                "-i", "`"$fullPath`""
+              )
+              
+              $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
+              
+              if ($process.ExitCode -eq 0) {
+                Write-Host "[SUCCESS] $trimmedFile"
+                $DEPLOYED++
+              } else {
+                Write-Error "Failed to deploy: $trimmedFile"
+                exit 1
+              }
+            } else {
+              Write-Error "File not found: $trimmedFile"
+              exit 1
+            }
+          }
+          Write-Host "Deployed $DEPLOYED ALTER file(s)"
 
   deploy_drop_stg:
     needs: [setup, deploy_alter_stg]
@@ -458,6 +536,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: changed-sql-lists
+          path: ./
 
       - name: Resolve & check sqlcmd
         shell: cmd
@@ -509,22 +588,42 @@ jobs:
           D: ${{ secrets.STG_DB_NAME }}
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
-        shell: cmd
+        shell: powershell
         run: |
-          setlocal EnableDelayedExpansion
-          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
-          set "DEPLOYED=0"
+          $ErrorActionPreference = 'Stop'
+          $PORT = $env:P
+          if ([string]::IsNullOrWhiteSpace($PORT)) { $PORT = "1433" }
+          $DEPLOYED = 0
           
-          for /f "usebackq delims=" %%F in (`type _changed_drop.txt`) do (
-            if exist "%%F" (
-              echo.
-              echo [DEPLOY] DROP: %%~nxF
-              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
-              echo [SUCCESS] %%~nxF
-              set /a DEPLOYED+=1
-            ) else (
-              echo [ERROR] File not found: %%F
-              exit /b 1
-            )
-          )
-          echo Deployed !DEPLOYED! DROP file(s)
+          $files = Get-Content '_changed_drop.txt' | Where-Object { $_.Trim() }
+          foreach ($file in $files) {
+            $trimmedFile = $file.Trim()
+            if (Test-Path $trimmedFile) {
+              Write-Host ""
+              Write-Host "[DEPLOY] DROP: $trimmedFile"
+              $fullPath = Resolve-Path $trimmedFile
+              
+              $sqlcmdArgs = @(
+                "-S", "$env:H,$PORT",
+                "-d", "$env:D", 
+                "-U", "$env:U",
+                "-P", "$env:W",
+                "-b", "-C",
+                "-i", "`"$fullPath`""
+              )
+              
+              $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
+              
+              if ($process.ExitCode -eq 0) {
+                Write-Host "[SUCCESS] $trimmedFile"
+                $DEPLOYED++
+              } else {
+                Write-Error "Failed to deploy: $trimmedFile"
+                exit 1
+              }
+            } else {
+              Write-Error "File not found: $trimmedFile"
+              exit 1
+            }
+          }
+          Write-Host "Deployed $DEPLOYED DROP file(s)"
