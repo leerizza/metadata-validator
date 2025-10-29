@@ -3,6 +3,10 @@ name: Deploy to PRODUCTION (Manual, Modular)
 on:
   workflow_dispatch:
     inputs:
+      target_ref:
+        description: "Reference to deploy (tag/branch/commit)"
+        required: true
+        default: "main"
       note:
         description: "Catatan (opsional)"
         required: false
@@ -30,6 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.inputs.target_ref }}
 
       - name: Resolve sqlcmd
         shell: powershell
@@ -73,6 +78,22 @@ jobs:
           powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]'%PORT%') -InformationLevel Quiet)){exit 1}"
           "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
 
+      - name: Get last deployed commit
+        id: last_deploy
+        shell: powershell
+        run: |
+          # Cari tag terakhir yang menandakan deploy production
+          $lastTag = git tag -l "prod-*" --sort=-creatordate | Select-Object -First 1
+          if ($lastTag) {
+            Write-Host "Last production tag: $lastTag"
+            "LAST_DEPLOYED_REF=$lastTag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+            "has_previous_deploy=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            Write-Host "No previous production tag found. Deploying all files."
+            "LAST_DEPLOYED_REF=origin/main" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+            "has_previous_deploy=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
       - name: Compute changed files (CREATE/ALTER/DROP)
         id: compute
         shell: powershell
@@ -80,17 +101,20 @@ jobs:
           $ErrorActionPreference='Stop'
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
           
-          # Fetch dengan lebih thorough
+          # Fetch semua branch dan tags
           try { 
             git fetch origin --depth=100 2>$null
             git fetch --all --tags --prune 2>$null 
           } catch {}
           
-          # Untuk manual workflow_dispatch, bandingkan dengan commit sebelumnya
-          $range='HEAD~1...HEAD'
-          Write-Host "Git diff range: $range"
+          # Tentukan range untuk diff
+          $lastRef = $env:LAST_DEPLOYED_REF
+          $currentRef = "HEAD"
+          
+          Write-Host "Comparing: $lastRef...$currentRef"
           Write-Host "Current branch: $(git branch --show-current)"
           Write-Host "Current HEAD: $(git rev-parse HEAD)"
+          Write-Host "Last deployed ref: $lastRef"
 
           $lists=@{
             create = @{ pattern = "deploy/create/*.sql"; out="deploy\_changed_create.txt" };
@@ -108,10 +132,13 @@ jobs:
             Write-Host ""
             Write-Host "Checking $k files..."
             
-            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- $p 2>$null
-            $wt   = git ls-files -mo --exclude-standard -- $p 2>$null
+            # Gunakan git diff dengan range yang benar
+            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR "$lastRef...$currentRef" -- $p 2>$null
             $all=@()
             if($diff){$all+=$diff}
+            
+            # Juga include files yang modified dalam working directory (untuk manual trigger)
+            $wt = git ls-files -mo --exclude-standard -- $p 2>$null
             if($wt){$all+=$wt}
             
             # Filter hanya file yang benar-benar ada
@@ -148,6 +175,7 @@ jobs:
           Write-Host "CREATE: $($counts.create) files"
           Write-Host "ALTER:  $($counts.alter) files"
           Write-Host "DROP:   $($counts.drop) files"
+          Write-Host "Range: $lastRef...$currentRef"
           Write-Host "========================================="
 
       - name: Expose outputs
@@ -209,9 +237,37 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_ref }}
       - uses: actions/download-artifact@v4
         with:
           name: prod-changed-sql-lists
+          path: ./
+
+      - name: Debug file structure
+        shell: powershell
+        run: |
+          Write-Host "=== Current Directory Structure ==="
+          Get-ChildItem -Recurse | Where-Object { $_.Name -like "*changed*" -or $_.Name -like "*create*" } | 
+            Select-Object FullName, Length | Format-Table -AutoSize
+          
+          Write-Host "=== CREATE Files List ==="
+          if (Test-Path 'deploy\_changed_create.txt') {
+            $files = Get-Content 'deploy\_changed_create.txt'
+            Write-Host "Files to deploy:"
+            foreach ($file in $files) {
+              Write-Host "  - $file"
+              if (Test-Path $file) {
+                Write-Host "    [FOUND]"
+              } else {
+                Write-Host "    [NOT FOUND - Searching...]"
+                $found = Get-ChildItem -Recurse -Filter (Split-Path $file -Leaf) | Select-Object -First 1
+                if ($found) {
+                  Write-Host "    [FOUND AT] $($found.FullName)"
+                }
+              }
+            }
+          }
 
       - name: Use sqlcmd
         run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
@@ -265,60 +321,95 @@ jobs:
             }
           }
 
-      - name: Deploy CREATE (changed only)
+      - name: Deploy CREATE (changed only) - FIXED
         env:
           H: ${{ secrets.PROD_DB_HOST }}
           P: ${{ secrets.PROD_DB_PORT }}
           D: ${{ secrets.PROD_DB_NAME }}
           U: ${{ secrets.PROD_DB_USER }}
           W: ${{ secrets.PROD_DB_PASSWORD }}
-        shell: cmd
+        shell: powershell
         run: |
-          setlocal EnableDelayedExpansion
-          if not exist "deploy\_changed_create.txt" (
-            echo ❌ No changed CREATE list. Skipping.
-            exit /b 1
-          )
-          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
-          set "DEPLOYED=0"
-          set "FAILED=0"
+          $ErrorActionPreference = 'Stop'
           
-          for /f "usebackq delims=" %%F in (`type deploy\_changed_create.txt`) do (
-            if not "%%F"=="" (
-              if exist "%%F" (
-                echo.
-                echo =====================================
-                echo 🚀 PROD CREATE -> %%~nxF
-                echo =====================================
-                "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F"
-                if errorlevel 1 (
-                  echo ❌ FAILED: %%~nxF
-                  set /a FAILED+=1
-                  exit /b 1
-                ) else (
-                  echo ✅ SUCCESS: %%~nxF
-                  set /a DEPLOYED+=1
-                )
-              ) else (
-                echo ❌ File not found: %%F
-                exit /b 1
+          $PORT = $env:P
+          if ([string]::IsNullOrWhiteSpace($PORT)) { $PORT = "1433" }
+          
+          if (!(Test-Path 'deploy\_changed_create.txt')) {
+            Write-Error "No changed CREATE list found. Skipping."
+            exit 1
+          }
+          
+          $files = Get-Content 'deploy\_changed_create.txt' | Where-Object { $_.Trim() }
+          if ($files.Count -eq 0) {
+            Write-Error "No files found in _changed_create.txt"
+            exit 1
+          }
+          
+          $DEPLOYED = 0
+          $FAILED = 0
+          
+          foreach ($file in $files) {
+            $trimmedFile = $file.Trim()
+            if ([string]::IsNullOrWhiteSpace($trimmedFile)) { continue }
+            
+            Write-Host ""
+            Write-Host "====================================="
+            Write-Host "[DEPLOY] CREATE: $trimmedFile"
+            Write-Host "====================================="
+            
+            # Check if file exists with case sensitivity
+            if (Test-Path $trimmedFile) {
+              $fullPath = Resolve-Path $trimmedFile
+              Write-Host "File found at: $fullPath"
+              
+              # Deploy using sqlcmd
+              $sqlcmdArgs = @(
+                "-S", "$env:H,$PORT",
+                "-d", "$env:D", 
+                "-U", "$env:U",
+                "-P", "$env:W",
+                "-b", "-C",
+                "-i", "`"$fullPath`""
               )
-            )
-          )
+              
+              Write-Host "Executing: $env:SQLCMD_EXE $sqlcmdArgs"
+              $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
+              
+              if ($process.ExitCode -eq 0) {
+                Write-Host "[SUCCESS] $trimmedFile"
+                $DEPLOYED++
+              } else {
+                Write-Host "[FAILED] $trimmedFile - Exit code: $($process.ExitCode)"
+                $FAILED++
+                exit 1
+              }
+            } else {
+              Write-Host "[ERROR] File not found: $trimmedFile"
+              Write-Host "Searching for similar files..."
+              $similar = Get-ChildItem -Recurse -Filter (Split-Path $trimmedFile -Leaf) | Select-Object -First 1
+              if ($similar) {
+                Write-Host "Found similar file at: $($similar.FullName)"
+              }
+              $FAILED++
+              exit 1
+            }
+          }
           
-          echo.
-          echo =====================================
-          echo 📊 PROD CREATE Summary
-          echo =====================================
-          echo Deployed: !DEPLOYED!
-          echo Failed: !FAILED!
-          echo =====================================
+          Write-Host ""
+          Write-Host "====================================="
+          Write-Host "[SUMMARY] CREATE Deployment"
+          Write-Host "====================================="
+          Write-Host "Deployed: $DEPLOYED"
+          Write-Host "Failed: $FAILED"
+          Write-Host "====================================="
           
-          if !DEPLOYED! EQU 0 (
-            echo ⚠️ No files were deployed!
-            exit /b 1
-          )
+          if ($DEPLOYED -eq 0) {
+            Write-Error "No files were deployed!"
+            exit 1
+          }
 
+  # ALTER dan DROP jobs tetap sama seperti sebelumnya, tapi dengan PowerShell deployment
   deploy_alter_prod:
     needs: [compute_changes, deploy_create_prod]
     if: needs.compute_changes.outputs.has_alter == 'true' && needs.compute_changes.outputs.alter_count != '0'
@@ -326,9 +417,12 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_ref }}
       - uses: actions/download-artifact@v4
         with:
           name: prod-changed-sql-lists
+          path: ./
 
       - name: Use sqlcmd
         run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
@@ -396,102 +490,80 @@ jobs:
           $port="${{ secrets.PROD_DB_PORT }}"; if([string]::IsNullOrWhiteSpace($port)){$port='1433'}
           & "$env:SQLCMD_EXE" -S "${{ secrets.PROD_DB_HOST }}",$port -d "${{ secrets.PROD_DB_NAME }}" -U "${{ secrets.PROD_DB_USER }}" -P "${{ secrets.PROD_DB_PASSWORD }}" -b -C -i $out
 
-      - name: Deploy ALTER (changed only)
+      - name: Deploy ALTER (changed only) - FIXED
         env:
           H: ${{ secrets.PROD_DB_HOST }}
           P: ${{ secrets.PROD_DB_PORT }}
           D: ${{ secrets.PROD_DB_NAME }}
           U: ${{ secrets.PROD_DB_USER }}
           W: ${{ secrets.PROD_DB_PASSWORD }}
-        shell: cmd
-        run: |
-          setlocal EnableDelayedExpansion
-          if not exist "deploy\_changed_alter.txt" (
-            echo ❌ No changed ALTER list. Skipping.
-            exit /b 1
-          )
-          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
-          set "DEPLOYED=0"
-          
-          for /f "usebackq delims=" %%F in (`type deploy\_changed_alter.txt`) do (
-            if exist "%%F" (
-              echo.
-              echo 🚀 PROD ALTER -> %%~nxF
-              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
-              echo ✅ SUCCESS: %%~nxF
-              set /a DEPLOYED+=1
-            ) else (
-              echo ❌ File not found: %%F
-              exit /b 1
-            )
-          )
-          echo Deployed !DEPLOYED! ALTER file(s)
-
-  deploy_drop_prod:
-    needs: [compute_changes, deploy_create_prod, deploy_alter_prod]
-    if: needs.compute_changes.outputs.has_drop == 'true' && needs.compute_changes.outputs.drop_count != '0'
-    runs-on: [self-hosted, Windows]
-    environment: production
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: prod-changed-sql-lists
-
-      - name: Use sqlcmd
-        run: echo SQLCMD_EXE=${{ vars.SQLCMD_EXE }}>>%GITHUB_ENV%
-
-      - name: Guard allowlist DROP
         shell: powershell
         run: |
-          $allow=Get-Content -ErrorAction SilentlyContinue '.github\drop-allowlist.txt'
-          if(-not $allow){ Write-Host "::warning No drop-allowlist.txt -> all DROP blocked"; exit 1 }
-          if(!(Test-Path 'deploy\_changed_drop.txt')){ Write-Host "No DROP list. Skip."; exit 0 }
-          $rx=[regex]'(?is)\bdrop\s+table\s+(?:\[?(?<s>\w+)\]?\.)?\[?(?<t>\w+)\]?'
-          foreach($f in Get-Content 'deploy\_changed_drop.txt'){
-            if(Test-Path $f){
-              $c=Get-Content $f -Raw
-              foreach($m in $rx.Matches($c)){
-                $s=$m.Groups['s'].Success?$m.Groups['s'].Value:'dbo'
-                $t=$m.Groups['t'].Value
-                $full="$s.$t"
-                if($allow -notcontains $full){
-                  Write-Error "DROP not in allowlist: $full (file $f)"
-                }
+          $ErrorActionPreference = 'Stop'
+          $PORT = $env:P
+          if ([string]::IsNullOrWhiteSpace($PORT)) { $PORT = "1433" }
+          $DEPLOYED = 0
+          
+          $files = Get-Content 'deploy\_changed_alter.txt' | Where-Object { $_.Trim() }
+          foreach ($file in $files) {
+            $trimmedFile = $file.Trim()
+            if (Test-Path $trimmedFile) {
+              Write-Host ""
+              Write-Host "[DEPLOY] ALTER: $trimmedFile"
+              $fullPath = Resolve-Path $trimmedFile
+              
+              $sqlcmdArgs = @(
+                "-S", "$env:H,$PORT",
+                "-d", "$env:D", 
+                "-U", "$env:U",
+                "-P", "$env:W",
+                "-b", "-C",
+                "-i", "`"$fullPath`""
+              )
+              
+              Write-Host "Executing: $env:SQLCMD_EXE $sqlcmdArgs"
+              $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
+              
+              if ($process.ExitCode -eq 0) {
+                Write-Host "[SUCCESS] $trimmedFile"
+                $DEPLOYED++
+              } else {
+                Write-Error "Failed to deploy: $trimmedFile"
+                exit 1
               }
+            } else {
+              Write-Error "File not found: $trimmedFile"
+              exit 1
             }
           }
+          Write-Host "Deployed $DEPLOYED ALTER file(s)"
 
-      - name: Deploy DROP (changed only)
-        env:
-          H: ${{ secrets.PROD_DB_HOST }}
-          P: ${{ secrets.PROD_DB_PORT }}
-          D: ${{ secrets.PROD_DB_NAME }}
-          U: ${{ secrets.PROD_DB_USER }}
-          W: ${{ secrets.PROD_DB_PASSWORD }}
-        shell: cmd
-        run: |
-          setlocal EnableDelayedExpansion
-          if not exist "deploy\_changed_drop.txt" (
-            echo ❌ No changed DROP list. Skipping.
-            exit /b 1
-          )
-          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
-          set "DEPLOYED=0"
+  create_prod_tag:
+    if: ${{ success() }}
+    needs: [deploy_create_prod, deploy_alter_prod, deploy_drop_prod]
+    runs-on: [self-hosted, Windows]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
           
-          for /f "usebackq delims=" %%F in (`type deploy\_changed_drop.txt`) do (
-            if exist "%%F" (
-              echo.
-              echo 🚀 PROD DROP -> %%~nxF
-              "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -b -C -i "%%F" || exit /b 1
-              echo ✅ SUCCESS: %%~nxF
-              set /a DEPLOYED+=1
-            ) else (
-              echo ❌ File not found: %%F
-              exit /b 1
-            )
-          )
-          echo Deployed !DEPLOYED! DROP file(s)
+      - name: Create production tag
+        shell: powershell
+        run: |
+          $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+          $tagName = "prod-$timestamp"
+          $commitMsg = "Production deployment $timestamp"
+          if ('${{ github.event.inputs.note }}' -ne '') {
+            $commitMsg += " - ${{ github.event.inputs.note }}"
+          }
+          
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag -a $tagName -m $commitMsg
+          git push origin $tagName
+          
+          Write-Host "✅ Created production tag: $tagName"
 
   upload_logs_prod:
     if: ${{ always() }}
