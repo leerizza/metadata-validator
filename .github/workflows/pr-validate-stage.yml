@@ -37,9 +37,7 @@ jobs:
             "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe"
           )
           $sqlcmd = $sqlcmdPaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-          if (!$sqlcmd) {
-            try { $sqlcmd = (where.exe sqlcmd 2>$null) } catch {}
-          }
+          if (!$sqlcmd) { try { $sqlcmd = (where.exe sqlcmd 2>$null) } catch {} }
           if (!$sqlcmd) { throw "sqlcmd.exe not found" }
           Write-Host "Using sqlcmd: $sqlcmd"
           Add-Content -Path $env:GITHUB_ENV -Value "SQLCMD_EXE=$sqlcmd"
@@ -122,88 +120,164 @@ jobs:
             $projects[$p] | Set-Content "_changed_${p}.txt" -Encoding UTF8
           }
 
-      - name: Load validation rules (safe)
+      - name: Load validation rules (pure PowerShell, no Node/npm)
         id: load_rules
         if: steps.detect_projects.outputs.has_changes == 'true'
         run: |
           $ErrorActionPreference='Stop'
-          if (!(Test-Path "rules.yml")) {
+          if (-not (Test-Path "rules.yml")) {
             Write-Host "⚠️ rules.yml not found, using basic validation"
             Add-Content -Path $env:GITHUB_OUTPUT -Value "rules_loaded=false"
             exit 0
           }
 
-          $rulesObj = $null
-          try {
-            if (Get-Command ConvertFrom-Yaml -ErrorAction SilentlyContinue) {
-              $rulesObj = Get-Content "rules.yml" -Raw | ConvertFrom-Yaml
-            } else {
-              Import-Module powershell-yaml -ErrorAction Stop
-              $rulesObj = Get-Content "rules.yml" -Raw | ConvertFrom-Yaml
-            }
-          } catch {
-            Write-Host "⚠️ YAML parse failed, fallback to basic validation: $($_.Exception.Message)"
-            Add-Content -Path $env:GITHUB_OUTPUT -Value "rules_loaded=false"
-            exit 0
+          function Convert-Scalar($s) {
+            if ($null -eq $s) { return "" }
+            $t = $s.Trim()
+            if ($t -match '^(?i:true|false)$') { return [bool]::Parse($t) }
+            if ($t -match '^-?\d+(\.\d+)?$')   { return [double]$t }
+            return $t.Trim("'`"")
           }
 
-          # Normalize -> JSON we’ll consume later
-          function As-Array($v) { if ($null -eq $v) { @() } elseif ($v -is [System.Collections.IEnumerable] -and -not ($v -is [string])) { @($v) } else { @($v) } }
+          # Read YAML as lines and parse indent-based keys/lists (fits your rules.yml structure)
+          $lines = Get-Content "rules.yml" -Raw -Encoding UTF8 -ErrorAction Stop -Delimiter "`n" | ForEach-Object { $_ }
+          $root  = [ordered]@{}
+          $stack = New-Object System.Collections.Stack
+          $stack.Push(@{ indent = -1; node = $root; key = $null; container = $null })
 
-          $normalized = [pscustomobject]@{
+          foreach ($raw in $lines) {
+            if ($null -eq $raw) { continue }
+            $trim = $raw.Trim()
+            if ($trim -eq "" -or $trim.StartsWith("#")) { continue }
+
+            $indent = ([regex]::Match($raw, '^( *)')).Groups[1].Value.Length
+            while ($stack.Count -gt 0 -and $indent -le $stack.Peek().indent) { [void]$stack.Pop() }
+            $parent = $stack.Peek()
+
+            if ($trim.StartsWith("- ")) {
+              $rest = $trim.Substring(2).Trim()
+              if (-not ($parent.node -is [System.Collections.IList])) {
+                if ($null -ne $parent.key -and $null -ne $parent.container) {
+                  $parent.container[$parent.key] = New-Object System.Collections.ArrayList
+                  $parent.node = $parent.container[$parent.key]
+                } else {
+                  $a = New-Object System.Collections.ArrayList
+                  $parent.node = $a
+                }
+              }
+              if ($rest -match '^\s*([^:]+)\s*:\s*(.+)$') {
+                $item = [ordered]@{}
+                $item[$Matches[1].Trim()] = Convert-Scalar $Matches[2]
+              } elseif ($rest.Length -gt 0) {
+                $item = Convert-Scalar $rest
+              } else {
+                $item = [ordered]@{}
+              }
+              [void]$parent.node.Add($item)
+              if ($item -is [hashtable]) {
+                $stack.Push(@{ indent = $indent; node = $item; key = $null; container = $parent.node })
+              }
+              continue
+            }
+
+            $kv = $trim -split ":", 2
+            if ($kv.Count -lt 2) { continue }
+            $key = $kv[0].Trim(" `"`'")
+            $val = $kv[1].Trim()
+
+            if ($parent.node -is [System.Collections.IList]) {
+              $last = $parent.node[$parent.node.Count-1]
+              if (-not ($last -is [hashtable])) {
+                $last = [ordered]@{}
+                [void]$parent.node.Add($last)
+              }
+              if ($val -eq "") {
+                $last[$key] = [ordered]@{}
+                $stack.Push(@{ indent = $indent; node = $last[$key]; key = $key; container = $last })
+              } else {
+                $last[$key] = Convert-Scalar $val
+              }
+            } else {
+              if ($val -eq "") {
+                $parent.node[$key] = [ordered]@{}
+                $stack.Push(@{ indent = $indent; node = $parent.node[$key]; key = $key; container = $parent.node })
+              } else {
+                $parent.node[$key] = Convert-Scalar $val
+              }
+            }
+          }
+
+          function As-Array($v) {
+            if ($null -eq $v) { return @() }
+            if ($v -is [System.Collections.IList]) { return $v }
+            return @($v)
+          }
+          function Get-Path($obj, [string]$path, $default=$null) {
+            $cur = $obj
+            foreach ($p in $path -split '\.') {
+              if ($null -eq $cur) { return $default }
+              if ($cur -is [System.Collections.IDictionary]) {
+                if (-not $cur.Contains($p)) { return $default }
+                $cur = $cur[$p]
+              } else { return $default }
+            }
+            if ($null -eq $cur) { return $default } else { return $cur }
+          }
+
+          $normalized = [ordered]@{
             type_guards = @{
               create = @{
-                enabled  = [bool]$rulesObj.type_guards.create.enabled
-                rules    = As-Array $rulesObj.type_guards.create.disallowed_patterns
+                enabled = [bool](Get-Path $root 'type_guards.create.enabled' $false)
+                rules   = As-Array (Get-Path $root 'type_guards.create.disallowed_patterns' @())
               }
               alter = @{
-                enabled  = [bool]$rulesObj.type_guards.alter.enabled
-                rules    = As-Array $rulesObj.type_guards.alter.disallowed_patterns
+                enabled = [bool](Get-Path $root 'type_guards.alter.enabled' $false)
+                rules   = As-Array (Get-Path $root 'type_guards.alter.disallowed_patterns' @())
               }
               drop = @{
-                enabled  = [bool]$rulesObj.type_guards.drop.enabled
-                rules    = @()
+                enabled = [bool](Get-Path $root 'type_guards.drop.enabled' $false)
+                rules   = @()
               }
             }
             naming_conventions = @{
-              enabled        = [bool]$rulesObj.naming_conventions.enabled
-              tables         = @{
-                pattern = "$($rulesObj.naming_conventions.tables.pattern)"
-                message = "$($rulesObj.naming_conventions.tables.message)"
+              enabled = [bool](Get-Path $root 'naming_conventions.enabled' $false)
+              tables  = @{
+                pattern = "" + (Get-Path $root 'naming_conventions.tables.pattern' "")
+                message = "" + (Get-Path $root 'naming_conventions.tables.message' "")
               }
-              columns        = @{
-                pattern = "$($rulesObj.naming_conventions.columns.pattern)"
-                message = "$($rulesObj.naming_conventions.columns.message)"
+              columns = @{
+                pattern = "" + (Get-Path $root 'naming_conventions.columns.pattern' "")
+                message = "" + (Get-Path $root 'naming_conventions.columns.message' "")
               }
             }
             performance_checks = @{
-              enabled = [bool]$rulesObj.performance_checks.enabled
-              rules   = As-Array $rulesObj.performance_checks.rules
+              enabled = [bool](Get-Path $root 'performance_checks.enabled' $false)
+              rules   = As-Array (Get-Path $root 'performance_checks.rules' @())
             }
             security_checks = @{
-              enabled = [bool]$rulesObj.security_checks.enabled
-              rules   = As-Array $rulesObj.security_checks.rules
+              enabled = [bool](Get-Path $root 'security_checks.enabled' $false)
+              rules   = As-Array (Get-Path $root 'security_checks.rules' @())
             }
             data_integrity = @{
-              enabled = [bool]$rulesObj.data_integrity.enabled
-              rules   = As-Array $rulesObj.data_integrity.rules
+              enabled = [bool](Get-Path $root 'data_integrity.enabled' $false)
+              rules   = As-Array (Get-Path $root 'data_integrity.rules' @())
             }
             code_quality = @{
-              enabled = [bool]$rulesObj.code_quality.enabled
-              rules   = As-Array $rulesObj.code_quality.rules
+              enabled = [bool](Get-Path $root 'code_quality.enabled' $false)
+              rules   = As-Array (Get-Path $root 'code_quality.rules' @())
             }
             custom_rules = @{
-              enabled = [bool]$rulesObj.custom_rules.enabled
-              rules   = As-Array $rulesObj.custom_rules.rules
+              enabled = [bool](Get-Path $root 'custom_rules.enabled' $false)
+              rules   = As-Array (Get-Path $root 'custom_rules.rules' @())
             }
             deployment_safety = @{
-              enabled = [bool]$rulesObj.deployment_safety.enabled
-              rules   = As-Array $rulesObj.deployment_safety.rules
+              enabled = [bool](Get-Path $root 'deployment_safety.enabled' $true)
+              rules   = As-Array (Get-Path $root 'deployment_safety.rules' @())
             }
           }
 
-          $normalized | ConvertTo-Json -Depth 20 | Set-Content "_validation_rules.json" -Encoding UTF8
-          Write-Host "✅ Loaded rules from rules.yml"
+          ($normalized | ConvertTo-Json -Depth 50) | Set-Content "_validation_rules.json" -Encoding UTF8
+          Write-Host "✅ rules.yml parsed (pure PowerShell) → _validation_rules.json"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "rules_loaded=true"
 
 
@@ -222,7 +296,6 @@ jobs:
             $rules = Get-Content "_validation_rules.json" | ConvertFrom-Json
           }
 
-          # Helpers
           Add-Type -AssemblyName "System.Core" | Out-Null
           $ROpts = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor `
                    [System.Text.RegularExpressions.RegexOptions]::Singleline -bor `
@@ -253,23 +326,23 @@ jobs:
               $isAlter  = Test-Pat $content '\bALTER\s+(TABLE|PROCEDURE|FUNCTION|VIEW)\b'
 
               if ($rules) {
-                # --- Type Guards ---
+                # Type guards
                 if ($rules.type_guards.create.enabled -and $isCreate) {
                   foreach ($r in $rules.type_guards.create.rules) {
-                    if (Test-Pat $content $r.pattern) {
+                    if ($null -ne $r.pattern -and Test-Pat $content $r.pattern) {
                       if ($r.severity -eq 'error') { $errors += "$($r.name): $($r.message)" } else { $warnings += "$($r.name): $($r.message)" }
                     }
                   }
                 }
                 if ($rules.type_guards.alter.enabled -and $isAlter) {
                   foreach ($r in $rules.type_guards.alter.rules) {
-                    if (Test-Pat $content $r.pattern) {
+                    if ($null -ne $r.pattern -and Test-Pat $content $r.pattern) {
                       if ($r.severity -eq 'error') { $errors += "$($r.name): $($r.message)" } else { $warnings += "$($r.name): $($r.message)" }
                     }
                   }
                 }
 
-                # --- Naming Conventions ---
+                # Naming conventions
                 if ($rules.naming_conventions.enabled) {
                   if ($isCreate -and $rules.naming_conventions.tables.pattern) {
                     if ($content -match '(?i)CREATE\s+TABLE\s+(?:\[?([a-zA-Z0-9_]+)\]?\.)?\[?([a-zA-Z0-9_]+)\]?') {
@@ -290,33 +363,32 @@ jobs:
                   }
                 }
 
-                # --- Category runners ---
-                function Apply-Rules($label,$enabled,$list){
-                  param([string]$label,[bool]$enabled,$list)
-                  if(-not $enabled){ return @() }
+                # Category runners
+                function Apply-Rules($enabled,$list,[string]$contentRef){
+                  if(-not $enabled){ return ,(@(),@()) }
                   $errs=@(); $warns=@()
                   foreach($r in $list){
-                    $pat = "$($r.pattern)"
+                    $pat = "" + $r.pattern
                     if([string]::IsNullOrEmpty($pat)){ continue }
-                    if(Test-Pat $content $pat){
+                    if(Test-Pat $contentRef $pat){
                       if($r.severity -eq 'error'){ $errs += "$($r.name): $($r.message)" } else { $warns += "$($r.name): $($r.message)" }
                     }
                   }
-                  return @($errs,$warns)
+                  return ,($errs,$warns)
                 }
 
-                $res = Apply-Rules "performance" ([bool]$rules.performance_checks.enabled) $rules.performance_checks.rules
+                $res = Apply-Rules $rules.performance_checks.enabled $rules.performance_checks.rules $content
                 $errors += $res[0]; $warnings += $res[1]
-                $res = Apply-Rules "security" ([bool]$rules.security_checks.enabled) $rules.security_checks.rules
+                $res = Apply-Rules $rules.security_checks.enabled $rules.security_checks.rules $content
                 $errors += $res[0]; $warnings += $res[1]
-                $res = Apply-Rules "data_integrity" ([bool]$rules.data_integrity.enabled) $rules.data_integrity.rules
+                $res = Apply-Rules $rules.data_integrity.enabled $rules.data_integrity.rules $content
                 $errors += $res[0]; $warnings += $res[1]
-                $res = Apply-Rules "code_quality" ([bool]$rules.code_quality.enabled) $rules.code_quality.rules
+                $res = Apply-Rules $rules.code_quality.enabled $rules.code_quality.rules $content
                 $errors += $res[0]; $warnings += $res[1]
-                $res = Apply-Rules "custom_rules" ([bool]$rules.custom_rules.enabled) $rules.custom_rules.rules
+                $res = Apply-Rules $rules.custom_rules.enabled $rules.custom_rules.rules $content
                 $errors += $res[0]; $warnings += $res[1]
 
-                # --- Deployment safety (specials) ---
+                # Deployment safety (special handling for Missing GO terminator)
                 if ($rules.deployment_safety.enabled) {
                   foreach ($r in $rules.deployment_safety.rules) {
                     if ($r.name -eq 'Missing GO terminator') {
@@ -326,8 +398,7 @@ jobs:
                       }
                       continue
                     }
-                    # default: regex apply
-                    if (Test-Pat $content "$($r.pattern)") {
+                    if ($null -ne $r.pattern -and Test-Pat $content "$($r.pattern)") {
                       if ($r.severity -eq 'error') { $errors += "$($r.name): $($r.message)" } else { $warnings += "$($r.name): $($r.message)" }
                     }
                   }
@@ -337,12 +408,10 @@ jobs:
                 if (Test-Pat $content '\bDROP\s+DATABASE\b') { $errors += "DROP DATABASE detected (CRITICAL - not allowed)" }
                 if (Test-Pat $content '\bTRUNCATE\s+TABLE\b') { $errors += "TRUNCATE TABLE detected (data loss risk)" }
                 if (Test-Pat $content '\bDROP\s+TABLE\b')     { $warnings += "DROP TABLE detected" }
-                # End must be GO (keep strict on fallback)
                 $last = Last-Line $content
                 if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) { $errors += "SQL file must end with GO statement" }
               }
 
-              # Emit
               foreach ($w in $warnings) { Write-Host "    ⚠️  $w" -ForegroundColor Yellow; $totalWarnings++ }
               if ($errors.Count -gt 0) {
                 Write-Host "    ❌ Validation FAILED" -ForegroundColor Red
@@ -362,7 +431,6 @@ jobs:
           if ($validationFailed) { Write-Host "Status: ❌ FAILED" -ForegroundColor Red; Write-Host "========================================="; throw "Validation failed" }
           Write-Host "Status: ✅ PASSED" -ForegroundColor Green
           Write-Host "========================================="
-
 
       - name: Deploy to STAGING (per project)
         if: steps.detect_projects.outputs.has_changes == 'true'
@@ -391,7 +459,6 @@ jobs:
             if (!(Test-Path $fileList)) { Write-Host "  ⚠️ No file list found, skipping"; continue }
 
             $files = Get-Content $fileList | Sort-Object
-
             $hasAlter = $false
             foreach ($f in $files) { if ((Get-Content $f -Raw) -match '(?i)\bALTER\s+TABLE\b') { $hasAlter = $true; break } }
             if ($hasAlter) { Write-Host "  📦 Project contains ALTER - create backup here if needed" -ForegroundColor Yellow }
@@ -442,14 +509,12 @@ jobs:
           script: |
             const fs = require('fs');
             const projects = '${{ steps.detect_projects.outputs.projects }}'.split(',').filter(Boolean);
-
             let status = '${{ job.status }}' === 'success' ? '✅ SUCCESS' : '❌ FAILED';
             let comment = '## 🚀 Staging Deployment Report\n\n';
             comment += `**Status:** ${status}\n`;
             comment += `**Environment:** STAGING\n`;
             comment += `**Projects deployed:** ${projects.length}\n\n`;
             comment += '### 📁 Projects\n\n';
-
             for (const proj of projects) {
               comment += `#### ${proj}\n\n`;
               const fileList = `_changed_${proj}.txt`;
@@ -466,7 +531,6 @@ jobs:
             }
             comment += '\n---\n';
             comment += `_Deployed at ${new Date().toISOString()}_`;
-
             try {
               await github.rest.issues.createComment({
                 issue_number: context.issue.number,
