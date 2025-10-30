@@ -338,10 +338,23 @@ jobs:
                 }
                 # --- TYPE GUARDS: ALTER ---
                 if ($rules.type_guards.alter.enabled -and $isAlter) {
+                  # normal content
                   foreach ($r in $rules.type_guards.alter.rules) {
                     if ($r.pattern -and (Test-Pat $content ([string]$r.pattern))) {
                       if ($r.severity -eq 'error') { $errors += ($r.name + ': ' + $r.message) } else { $warnings += ($r.name + ': ' + $r.message) }
+                    } else {
+                      # coba lagi di konten yang dinormalisasi (semua whitespace → 1 spasi)
+                      $contentNorm = ($content -replace '\s+', ' ')
+                      if ($r.pattern -and (Test-Pat $contentNorm ([string]$r.pattern))) {
+                        if ($r.severity -eq 'error') { $errors += ($r.name + ': ' + $r.message) } else { $warnings += ($r.name + ': ' + $r.message) }
+                      }
                     }
+                  }
+
+                  # --- SAFETY NET: blok MAX types apapun polanya ---
+                  $contentNorm = ($content -replace '\s+', ' ')
+                  if (Test-Pat $contentNorm '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)') {
+                    $errors += 'MAX data types in ALTER are not allowed (VARCHAR(MAX)/NVARCHAR(MAX)/VARBINARY(MAX))'
                   }
                 }
 

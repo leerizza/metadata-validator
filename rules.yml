@@ -47,6 +47,10 @@ type_guards:
         name: "MAX data types"
         message: "Cannot ALTER columns to VARCHAR(MAX), NVARCHAR(MAX), or VARBINARY(MAX)"
         severity: error
+      - pattern: '\bALTER\s+TABLE\b[\s\S]*?\bALTER\s+COLUMN\b[\s\S]*?\b(n?varchar|varbinary)\s*\(\s*max\s*\)'
+        name: "MAX data types (ALTER COLUMN)"
+        message: "ALTER COLUMN ke *MAX tidak diperbolehkan"
+        severity: error
         reason: "MAX types can cause performance degradation on large tables"
         examples:
           bad: "ALTER COLUMN description VARCHAR(MAX)"
