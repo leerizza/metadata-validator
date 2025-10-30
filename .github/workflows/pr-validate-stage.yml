@@ -328,21 +328,24 @@ jobs:
               $isAlter  = Test-Pat $content '\bALTER\s+(TABLE|PROCEDURE|FUNCTION|VIEW)\b'
 
               if ($rules) {
+                # --- TYPE GUARDS: CREATE ---
                 if ($rules.type_guards.create.enabled -and $isCreate) {
                   foreach ($r in $rules.type_guards.create.rules) {
-                    if ($null -ne $r.pattern -and Test-Pat $content $r.pattern) {
+                    if ($r.pattern -and (Test-Pat $content ([string]$r.pattern))) {
                       if ($r.severity -eq 'error') { $errors += ($r.name + ': ' + $r.message) } else { $warnings += ($r.name + ': ' + $r.message) }
                     }
                   }
                 }
+                # --- TYPE GUARDS: ALTER ---
                 if ($rules.type_guards.alter.enabled -and $isAlter) {
                   foreach ($r in $rules.type_guards.alter.rules) {
-                    if ($null -ne $r.pattern -and Test-Pat $content $r.pattern) {
+                    if ($r.pattern -and (Test-Pat $content ([string]$r.pattern))) {
                       if ($r.severity -eq 'error') { $errors += ($r.name + ': ' + $r.message) } else { $warnings += ($r.name + ': ' + $r.message) }
                     }
                   }
                 }
 
+                # --- NAMING ---
                 if ($rules.naming_conventions.enabled) {
                   if ($isCreate -and $rules.naming_conventions.tables.pattern) {
                     if ($content -match '(?i)CREATE\s+TABLE\s+(?:\[?([a-zA-Z0-9_]+)\]?\.)?\[?([a-zA-Z0-9_]+)\]?') {
@@ -363,6 +366,7 @@ jobs:
                   }
                 }
 
+                # --- GENERIC CATEGORY RUNNER ---
                 function Apply-Rules($enabled,$list,[string]$contentRef){
                   if(-not $enabled){ return ,(@(),@()) }
                   $errs=@(); $warns=@()
@@ -387,6 +391,7 @@ jobs:
                 $res = Apply-Rules $rules.custom_rules.enabled $rules.custom_rules.rules $content
                 $errors += $res[0]; $warnings += $res[1]
 
+                # --- DEPLOYMENT SAFETY ---
                 if ($rules.deployment_safety.enabled) {
                   foreach ($r in $rules.deployment_safety.rules) {
                     if ($r.name -eq 'Missing GO terminator') {
@@ -394,12 +399,13 @@ jobs:
                       if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) {
                         if ($r.severity -eq 'error') { $errors += $r.message } else { $warnings += $r.message }
                       }
-                    } elseif ($null -ne $r.pattern -and Test-Pat $content ('' + $r.pattern)) {
+                    } elseif ($r.pattern -and (Test-Pat $content ([string]$r.pattern))) {
                       if ($r.severity -eq 'error') { $errors += ($r.name + ': ' + $r.message) } else { $warnings += ($r.name + ': ' + $r.message) }
                     }
                   }
                 }
               } else {
+                # Fallback minimal checks
                 if (Test-Pat $content '\bDROP\s+DATABASE\b') { $errors += 'DROP DATABASE detected (CRITICAL - not allowed)' }
                 if (Test-Pat $content '\bTRUNCATE\s+TABLE\b') { $errors += 'TRUNCATE TABLE detected (data loss risk)' }
                 if (Test-Pat $content '\bDROP\s+TABLE\b')     { $warnings += 'DROP TABLE detected' }
