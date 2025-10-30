@@ -1,4 +1,4 @@
-name: Validate & Deploy to STAGING (Modular)
+name: Validate & Deploy to STAGING (With Python Validator)
 
 on:
   pull_request:
@@ -8,7 +8,7 @@ on:
       - "tables/**/*.yaml"
       - "scripts/**"
       - "rules.yml"
-      - ".github/workflows/**"
+      - ".github/**"
 
 defaults:
   run:
@@ -28,6 +28,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
 
       - name: Resolve sqlcmd
         shell: powershell
@@ -93,17 +103,13 @@ jobs:
           } else {
             $before='${{ github.event.before }}'
             if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { 
-              Write-Host "Using HEAD~1 (no valid before commit)"
               $range='HEAD~1...HEAD' 
             } else { 
-              Write-Host "Using before commit: $before"
               $range="$before...HEAD" 
             }
           }
           
           Write-Host "Git diff range (CREATE): $range"
-          Write-Host "Current branch: $(git branch --show-current)"
-          Write-Host "Current HEAD: $(git rev-parse HEAD)"
           
           $all = @()
           if (Test-Path 'deploy/create') {
@@ -112,8 +118,6 @@ jobs:
             if($diff){ $all+=$diff }
             if($wt){ $all+=$wt }
             $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
-          } else {
-            Write-Host "[WARN] Folder deploy/create does not exist"
           }
           
           Write-Host "Found $($all.Count) CREATE file(s)"
@@ -123,21 +127,32 @@ jobs:
             $all | Set-Content -Encoding UTF8 -LiteralPath $outFile
             "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=$($all.Count)" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[OK] CREATE files changed:"
+            Write-Host "[OK] CREATE files detected:"
             $all | ForEach-Object { Write-Host "   - $_" }
-            
-            # DEBUG: Simpan juga absolute path untuk debugging
-            $absolutePaths = $all | ForEach-Object { 
-              $fullPath = (Resolve-Path $_).Path
-              Write-Host "Absolute path: $fullPath"
-              $fullPath
-            }
-            $absolutePaths | Set-Content -Encoding UTF8 -LiteralPath '_changed_create_absolute.txt'
           } else {
             "" | Set-Content -Encoding UTF8 -LiteralPath $outFile -NoNewline
             "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[INFO] No CREATE changes detected"
+            Write-Host "[INFO] No CREATE changes"
+          }
+
+      - name: Validate CREATE files with Python
+        if: steps.chg_create.outputs.has_changes == 'true'
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Validating CREATE files with Python"
+          Write-Host "=========================================="
+          
+          $files = Get-Content '_changed_create.txt'
+          $fileList = $files -join ' '
+          
+          $result = python scripts/validate_sql.py --type create $fileList
+          if ($LASTEXITCODE -ne 0) {
+            throw "SQL validation failed for CREATE files"
           }
 
       - name: Compute ALTER changes
@@ -151,8 +166,6 @@ jobs:
             if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { $range='HEAD~1...HEAD' } else { $range="$before...HEAD" }
           }
 
-          Write-Host "Git diff range (ALTER): $range"
-
           $all = @()
           if (Test-Path 'deploy/alter') {
             $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/alter/**/*.sql" 2>$null
@@ -160,8 +173,6 @@ jobs:
             if($diff){ $all+=$diff }
             if($wt){ $all+=$wt }
             $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
-          } else {
-            Write-Host "[WARN] Folder deploy/alter does not exist"
           }
 
           Write-Host "Found $($all.Count) ALTER file(s)"
@@ -169,14 +180,32 @@ jobs:
           $outFile = '_changed_alter.txt'
           if ($all.Count -gt 0) {
             $all | Set-Content -Encoding UTF8 -LiteralPath $outFile
-            "has_changes=true"       | Out-File $env:GITHUB_OUTPUT -Append
+            "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=$($all.Count)" | Out-File $env:GITHUB_OUTPUT -Append
           } else {
             "" | Set-Content -Encoding UTF8 -LiteralPath $outFile -NoNewline
-            "has_changes=false"      | Out-File $env:GITHUB_OUTPUT -Append
-            "file_count=0"           | Out-File $env:GITHUB_OUTPUT -Append
+            "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
+            "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
           }
 
+      - name: Validate ALTER files with Python
+        if: steps.chg_alter.outputs.has_changes == 'true'
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Validating ALTER files with Python"
+          Write-Host "=========================================="
+          
+          $files = Get-Content '_changed_alter.txt'
+          $fileList = $files -join ' '
+          
+          $result = python scripts/validate_sql.py --type alter $fileList
+          if ($LASTEXITCODE -ne 0) {
+            throw "SQL validation failed for ALTER files"
+          }
 
       - name: Compute DROP changes
         id: chg_drop
@@ -184,18 +213,10 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $base='${{ github.base_ref }}'
-          if ($base) { 
-            $range="origin/$base...HEAD" 
-          } else {
+          if ($base) { $range="origin/$base...HEAD" } else {
             $before='${{ github.event.before }}'
-            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { 
-              $range='HEAD~1...HEAD' 
-            } else { 
-              $range="$before...HEAD" 
-            }
+            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { $range='HEAD~1...HEAD' } else { $range="$before...HEAD" }
           }
-          
-          Write-Host "Git diff range (DROP): $range"
           
           $all = @()
           if (Test-Path 'deploy/drop') {
@@ -204,8 +225,6 @@ jobs:
             if($diff){ $all+=$diff }
             if($wt){ $all+=$wt }
             $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
-          } else {
-            Write-Host "[WARN] Folder deploy/drop does not exist"
           }
           
           Write-Host "Found $($all.Count) DROP file(s)"
@@ -215,13 +234,10 @@ jobs:
             $all | Set-Content -Encoding UTF8 -LiteralPath $outFile
             "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=$($all.Count)" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[OK] DROP files changed:"
-            $all | ForEach-Object { Write-Host "   - $_" }
           } else {
             "" | Set-Content -Encoding UTF8 -LiteralPath $outFile -NoNewline
             "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[INFO] No DROP changes detected"
           }
 
       - name: Upload change lists
@@ -255,91 +271,30 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          
       - uses: actions/download-artifact@v4
         with:
           name: changed-sql-lists
           path: ./
 
-      - name: Debug workspace structure
-        shell: powershell
-        run: |
-          Write-Host "=== WORKSPACE STRUCTURE ==="
-          Get-ChildItem -Recurse | Where-Object { $_.Name -like "*create*" -or $_.Name -like "*stg_test*" } | 
-            Select-Object FullName, Length, LastWriteTime | 
-            Format-Table -AutoSize
-          
-          Write-Host "=== CHANGED FILES LIST ==="
-          if (Test-Path '_changed_create.txt') {
-            $files = Get-Content '_changed_create.txt'
-            Write-Host "Files in _changed_create.txt:"
-            foreach ($file in $files) {
-              Write-Host "  - $file"
-              if (Test-Path $file) {
-                Write-Host "    [FOUND] Size: $((Get-Item $file).Length) bytes"
-              } else {
-                Write-Host "    [NOT FOUND]"
-                # Coba cari file dengan pattern
-                $found = Get-ChildItem -Recurse -Filter (Split-Path $file -Leaf) | Select-Object -First 1
-                if ($found) {
-                  Write-Host "    [FOUND SIMILAR] At: $($found.FullName)"
-                }
-              }
-            }
-          } else {
-            Write-Host "File _changed_create.txt not found"
-          }
-
       - name: Resolve & check sqlcmd
-        shell: cmd
-        run: |
-          setlocal EnableExtensions EnableDelayedExpansion
-          set "SQLCMD_EXE=${{ vars.SQLCMD_EXE }}"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\SqlCmd\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe"
-          if not defined SQLCMD_EXE (
-            for /f "delims=" %%I in ('where sqlcmd 2^>NUL') do if not defined SQLCMD_EXE set "SQLCMD_EXE=%%I"
-          )
-          if not defined SQLCMD_EXE (
-            echo [ERROR] sqlcmd.exe not found. Set repository variable SQLCMD_EXE or install SQL tools.
-            exit /b 1
-          )
-          echo Using sqlcmd: %SQLCMD_EXE%
-          "%SQLCMD_EXE%" -? >NUL || (echo [ERROR] sqlcmd not executable & exit /b 1)
-          echo SQLCMD_EXE=%SQLCMD_EXE%>>%GITHUB_ENV%
-
-      - name: Verify change list exists
         shell: powershell
         run: |
-          Write-Host "Checking for _changed_create.txt..."
-          Write-Host "Current directory: $(Get-Location)"
-          Write-Host "Available files in current directory:"
-          Get-ChildItem | Select-Object Name, Length | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
-          
-          if (!(Test-Path '_changed_create.txt')) {
-            Write-Host "::error::File _changed_create.txt not found after artifact download!"
-            Write-Host "This is a workflow bug - the file should have been created in setup job."
-            exit 1
+          $ErrorActionPreference='Stop'
+          $SQLCMD_EXE='${{ vars.SQLCMD_EXE }}'
+          if ([string]::IsNullOrWhiteSpace($SQLCMD_EXE)) {
+            $paths = @(
+              "C:\Program Files\SqlCmd\sqlcmd.exe",
+              "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe",
+              "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe",
+              "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe"
+            )
+            $SQLCMD_EXE = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
           }
-          
-          $content = Get-Content '_changed_create.txt' -Raw -ErrorAction SilentlyContinue
-          Write-Host "File content length: $($content.Length) chars"
-          
-          if ([string]::IsNullOrWhiteSpace($content)) {
-            Write-Host "::error::File _changed_create.txt is empty!"
-            Write-Host "This means no CREATE files were detected as changed in the setup job."
-            Write-Host "This job should not have run. Check the job conditions."
-            exit 1
-          }
-          
-          $lines = $content -split "`n" | Where-Object { $_.Trim() }
-          Write-Host "[OK] Found $($lines.Count) file(s) to deploy:"
-          $lines | ForEach-Object { Write-Host "  - $($_.Trim())" }
+          if ([string]::IsNullOrWhiteSpace($SQLCMD_EXE)) { throw "sqlcmd.exe not found" }
+          Write-Host "Using sqlcmd: $SQLCMD_EXE"
+          "SQLCMD_EXE=$SQLCMD_EXE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
-      - name: Deploy CREATE (changed only) - FIXED VERSION
+      - name: Deploy CREATE files
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
@@ -349,84 +304,37 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          $PORT = if ($env:P) { $env:P } else { "1433" }
           
-          $PORT = $env:P
-          if ([string]::IsNullOrWhiteSpace($PORT)) { $PORT = "1433" }
-          
-          if (!(Test-Path '_changed_create.txt')) {
-            Write-Error "No changed CREATE list found. Skipping."
-            exit 1
-          }
+          if (!(Test-Path '_changed_create.txt')) { throw "File not found" }
           
           $files = Get-Content '_changed_create.txt' | Where-Object { $_.Trim() }
-          if ($files.Count -eq 0) {
-            Write-Error "No files found in _changed_create.txt"
-            exit 1
-          }
+          if ($files.Count -eq 0) { throw "No files to deploy" }
           
           $DEPLOYED = 0
-          $FAILED = 0
           
           foreach ($file in $files) {
             $trimmedFile = $file.Trim()
             if ([string]::IsNullOrWhiteSpace($trimmedFile)) { continue }
             
             Write-Host ""
-            Write-Host "====================================="
-            Write-Host "[DEPLOY] CREATE: $trimmedFile"
-            Write-Host "====================================="
+            Write-Host "[DEPLOY CREATE] $trimmedFile"
             
-            # Check if file exists with case sensitivity
-            if (Test-Path $trimmedFile) {
-              $fullPath = Resolve-Path $trimmedFile
-              Write-Host "File found at: $fullPath"
-              
-              # Deploy using sqlcmd
-              $sqlcmdArgs = @(
-                "-S", "$env:H,$PORT",
-                "-d", "$env:D", 
-                "-U", "$env:U",
-                "-P", "$env:W",
-                "-b", "-C",
-                "-i", "`"$fullPath`""
-              )
-              
-              $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
-              
-              if ($process.ExitCode -eq 0) {
-                Write-Host "[SUCCESS] $trimmedFile"
-                $DEPLOYED++
-              } else {
-                Write-Host "[FAILED] $trimmedFile - Exit code: $($process.ExitCode)"
-                $FAILED++
-                exit 1
-              }
-            } else {
-              Write-Host "[ERROR] File not found: $trimmedFile"
-              Write-Host "Searching for similar files..."
-              $similar = Get-ChildItem -Recurse -Filter (Split-Path $trimmedFile -Leaf) | Select-Object -First 1
-              if ($similar) {
-                Write-Host "Found similar file at: $($similar.FullName)"
-              }
-              $FAILED++
-              exit 1
-            }
+            if (!(Test-Path $trimmedFile)) { throw "File not found: $trimmedFile" }
+            
+            $fullPath = Resolve-Path $trimmedFile
+            $sqlcmdArgs = @("-S", "$env:H,$PORT", "-d", "$env:D", "-U", "$env:U", "-P", "$env:W", "-b", "-C", "-i", "`"$fullPath`"")
+            $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
+            
+            if ($process.ExitCode -ne 0) { throw "Deploy failed: $trimmedFile" }
+            
+            Write-Host "[SUCCESS] $trimmedFile"
+            $DEPLOYED++
           }
           
           Write-Host ""
-          Write-Host "====================================="
-          Write-Host "[SUMMARY] CREATE Deployment"
-          Write-Host "====================================="
-          Write-Host "Deployed: $DEPLOYED"
-          Write-Host "Failed: $FAILED"
-          Write-Host "====================================="
-          
-          if ($DEPLOYED -eq 0) {
-            Write-Error "No files were deployed!"
-            exit 1
-          }
+          Write-Host "Deployed $DEPLOYED CREATE file(s)"
 
-  # Jobs deploy_alter_stg dan deploy_drop_stg tetap sama...
   deploy_alter_stg:
     needs: [setup, deploy_create_stg]
     if: needs.setup.outputs.alter_changed == 'true' && needs.setup.outputs.alter_count != '0'
@@ -442,34 +350,18 @@ jobs:
           path: ./
 
       - name: Resolve & check sqlcmd
-        shell: cmd
+        shell: powershell
         run: |
-          setlocal EnableExtensions EnableDelayedExpansion
-          set "SQLCMD_EXE=${{ vars.SQLCMD_EXE }}"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\SqlCmd\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe"
-          if not defined SQLCMD_EXE (
-            for /f "delims=" %%I in ('where sqlcmd 2^>NUL') do if not defined SQLCMD_EXE set "SQLCMD_EXE=%%I"
-          )
-          if not defined SQLCMD_EXE (
-            echo [ERROR] sqlcmd.exe not found.
-            exit /b 1
-          )
-          echo Using sqlcmd: %SQLCMD_EXE%
-          "%SQLCMD_EXE%" -? >NUL || exit /b 1
-          echo SQLCMD_EXE=%SQLCMD_EXE%>>%GITHUB_ENV%
+          $ErrorActionPreference='Stop'
+          $SQLCMD_EXE='${{ vars.SQLCMD_EXE }}'
+          if ([string]::IsNullOrWhiteSpace($SQLCMD_EXE)) {
+            $paths = @("C:\Program Files\SqlCmd\sqlcmd.exe", "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe", "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe", "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe")
+            $SQLCMD_EXE = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if ([string]::IsNullOrWhiteSpace($SQLCMD_EXE)) { throw "sqlcmd.exe not found" }
+          "SQLCMD_EXE=$SQLCMD_EXE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
-      - name: Show changed list (ALTER)
-        shell: cmd
-        run: |
-          if not exist "_changed_alter.txt" ( echo [ERROR] Missing file & exit /b 1 )
-          echo Files to deploy:
-          type _changed_alter.txt
-
-      - name: Deploy ALTER (changed only)
+      - name: Deploy ALTER files
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
@@ -479,40 +371,19 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $PORT = $env:P
-          if ([string]::IsNullOrWhiteSpace($PORT)) { $PORT = "1433" }
+          $PORT = if ($env:P) { $env:P } else { "1433" }
           $DEPLOYED = 0
-          
           $files = Get-Content '_changed_alter.txt' | Where-Object { $_.Trim() }
           foreach ($file in $files) {
             $trimmedFile = $file.Trim()
-            if (Test-Path $trimmedFile) {
-              Write-Host ""
-              Write-Host "[DEPLOY] ALTER: $trimmedFile"
-              $fullPath = Resolve-Path $trimmedFile
-              
-              $sqlcmdArgs = @(
-                "-S", "$env:H,$PORT",
-                "-d", "$env:D", 
-                "-U", "$env:U",
-                "-P", "$env:W",
-                "-b", "-C",
-                "-i", "`"$fullPath`""
-              )
-              
-              $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
-              
-              if ($process.ExitCode -eq 0) {
-                Write-Host "[SUCCESS] $trimmedFile"
-                $DEPLOYED++
-              } else {
-                Write-Error "Failed to deploy: $trimmedFile"
-                exit 1
-              }
-            } else {
-              Write-Error "File not found: $trimmedFile"
-              exit 1
-            }
+            if (!(Test-Path $trimmedFile)) { throw "File not found: $trimmedFile" }
+            Write-Host "[DEPLOY ALTER] $trimmedFile"
+            $fullPath = Resolve-Path $trimmedFile
+            $sqlcmdArgs = @("-S", "$env:H,$PORT", "-d", "$env:D", "-U", "$env:U", "-P", "$env:W", "-b", "-C", "-i", "`"$fullPath`"")
+            $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
+            if ($process.ExitCode -ne 0) { throw "Deploy failed: $trimmedFile" }
+            Write-Host "[SUCCESS] $trimmedFile"
+            $DEPLOYED++
           }
           Write-Host "Deployed $DEPLOYED ALTER file(s)"
 
@@ -531,49 +402,35 @@ jobs:
           path: ./
 
       - name: Resolve & check sqlcmd
-        shell: cmd
+        shell: powershell
         run: |
-          setlocal EnableExtensions EnableDelayedExpansion
-          set "SQLCMD_EXE=${{ vars.SQLCMD_EXE }}"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\SqlCmd\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\SqlCmd\sqlcmd.exe"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe"
-          if not defined SQLCMD_EXE if exist "C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe" set "SQLCMD_EXE=C:\Program Files\Microsoft SQL Server\140\Tools\Binn\sqlcmd.exe"
-          if not defined SQLCMD_EXE (
-            for /f "delims=" %%I in ('where sqlcmd 2^>NUL') do if not defined SQLCMD_EXE set "SQLCMD_EXE=%%I"
-          )
-          if not defined SQLCMD_EXE (
-            echo [ERROR] sqlcmd.exe not found.
-            exit /b 1
-          )
-          echo Using sqlcmd: %SQLCMD_EXE%
-          "%SQLCMD_EXE%" -? >NUL || exit /b 1
-          echo SQLCMD_EXE=%SQLCMD_EXE%>>%GITHUB_ENV%
+          $ErrorActionPreference='Stop'
+          $SQLCMD_EXE='${{ vars.SQLCMD_EXE }}'
+          if ([string]::IsNullOrWhiteSpace($SQLCMD_EXE)) {
+            $paths = @("C:\Program Files\SqlCmd\sqlcmd.exe", "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe")
+            $SQLCMD_EXE = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if ([string]::IsNullOrWhiteSpace($SQLCMD_EXE)) { throw "sqlcmd.exe not found" }
+          "SQLCMD_EXE=$SQLCMD_EXE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
       - name: Guard allowlist DROP
         shell: powershell
         run: |
           $allow=Get-Content -ErrorAction SilentlyContinue '.github\drop-allowlist.txt'
-          if(-not $allow){Write-Host "::warning No drop-allowlist.txt -> all DROP blocked";exit 1}
+          if(-not $allow){throw "No drop-allowlist.txt -> all DROP blocked"}
           $rx=[regex]'(?is)\bdrop\s+table\s+(?:\[?(?<s>\w+)\]?\.)?\[?(?<t>\w+)\]?'
           foreach($f in Get-Content '_changed_drop.txt'){
-            $c=Get-Content $f -Raw
-            foreach($m in $rx.Matches($c)){
-              $s=$m.Groups['s'].Success?$m.Groups['s'].Value:'dbo'
-              $t=$m.Groups['t'].Value
-              $full="$s.$t"
-              if($allow -notcontains $full){Write-Error "DROP not in allowlist: $full (file $f)"}
+            if(Test-Path $f){
+              $c=Get-Content $f -Raw
+              foreach($m in $rx.Matches($c)){
+                $s=$m.Groups['s'].Success?$m.Groups['s'].Value:'dbo'
+                $t=$m.Groups['t'].Value
+                if($allow -notcontains "$s.$t"){throw "DROP not in allowlist: $s.$t"}
+              }
             }
           }
 
-      - name: Show changed list (DROP)
-        shell: cmd
-        run: |
-          if not exist "_changed_drop.txt" ( echo [ERROR] Missing file & exit /b 1 )
-          type _changed_drop.txt
-
-      - name: Deploy DROP (changed only)
+      - name: Deploy DROP files
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
@@ -583,39 +440,18 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $PORT = $env:P
-          if ([string]::IsNullOrWhiteSpace($PORT)) { $PORT = "1433" }
+          $PORT = if ($env:P) { $env:P } else { "1433" }
           $DEPLOYED = 0
-          
           $files = Get-Content '_changed_drop.txt' | Where-Object { $_.Trim() }
           foreach ($file in $files) {
             $trimmedFile = $file.Trim()
-            if (Test-Path $trimmedFile) {
-              Write-Host ""
-              Write-Host "[DEPLOY] DROP: $trimmedFile"
-              $fullPath = Resolve-Path $trimmedFile
-              
-              $sqlcmdArgs = @(
-                "-S", "$env:H,$PORT",
-                "-d", "$env:D", 
-                "-U", "$env:U",
-                "-P", "$env:W",
-                "-b", "-C",
-                "-i", "`"$fullPath`""
-              )
-              
-              $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
-              
-              if ($process.ExitCode -eq 0) {
-                Write-Host "[SUCCESS] $trimmedFile"
-                $DEPLOYED++
-              } else {
-                Write-Error "Failed to deploy: $trimmedFile"
-                exit 1
-              }
-            } else {
-              Write-Error "File not found: $trimmedFile"
-              exit 1
-            }
+            if (!(Test-Path $trimmedFile)) { throw "File not found: $trimmedFile" }
+            Write-Host "[DEPLOY DROP] $trimmedFile"
+            $fullPath = Resolve-Path $trimmedFile
+            $sqlcmdArgs = @("-S", "$env:H,$PORT", "-d", "$env:D", "-U", "$env:U", "-P", "$env:W", "-b", "-C", "-i", "`"$fullPath`"")
+            $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
+            if ($process.ExitCode -ne 0) { throw "Deploy failed: $trimmedFile" }
+            Write-Host "[SUCCESS] $trimmedFile"
+            $DEPLOYED++
           }
           Write-Host "Deployed $DEPLOYED DROP file(s)"
