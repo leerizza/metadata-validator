@@ -159,7 +159,7 @@ jobs:
             
             $lines = $yamlBlock -split "`n"
             foreach ($line in $lines) {
-              if ($line -match "^\s{$indent}- pattern:\s*['\`"](.+?)['\`"]") {
+              if ($line -match "^\s{$indent}- pattern:\s*['""](.+?)['""]") {
                 if ($currentPattern) { $patterns += $currentPattern }
                 $currentPattern = @{
                   pattern = $matches[1]
@@ -169,10 +169,10 @@ jobs:
                 }
               }
               elseif ($currentPattern) {
-                if ($line -match "^\s+name:\s*['\`"](.+?)['\`"]") {
+                if ($line -match "^\s+name:\s*['""](.+?)['""]") {
                   $currentPattern.name = $matches[1]
                 }
-                elseif ($line -match "^\s+message:\s*['\`"](.+?)['\`"]") {
+                elseif ($line -match "^\s+message:\s*['""](.+?)['""]") {
                   $currentPattern.message = $matches[1]
                 }
                 elseif ($line -match "^\s+severity:\s*(\w+)") {
@@ -206,14 +206,14 @@ jobs:
           
           $tableNamePattern = ""
           $tableNameMessage = ""
-          if ($rulesContent -match "(?ms)tables:\s*\n\s*pattern:\s*['\`"](.+?)['\`"]\s*\n\s*message:\s*['\`"](.+?)['\`"]") {
+          if ($rulesContent -match "(?ms)tables:\s*\n\s*pattern:\s*['""](.+?)['""]\s*\n\s*message:\s*['""](.+?)['""]") {
             $tableNamePattern = $matches[1]
             $tableNameMessage = $matches[2]
           }
           
           $columnNamePattern = ""
           $columnNameMessage = ""
-          if ($rulesContent -match "(?ms)columns:\s*\n\s*pattern:\s*['\`"](.+?)['\`"]\s*\n\s*message:\s*['\`"](.+?)['\`"]") {
+          if ($rulesContent -match "(?ms)columns:\s*\n\s*pattern:\s*['""](.+?)['""]\s*\n\s*message:\s*['""](.+?)['""]") {
             $columnNamePattern = $matches[1]
             $columnNameMessage = $matches[2]
           }
@@ -553,8 +553,10 @@ jobs:
           if-no-files-found: ignore
 
       - name: Comment on PR
-        if: always() && steps.detect_projects.outputs.has_changes == 'true'
+        if: always() && steps.detect_projects.outputs.has_changes == 'true' && github.event_name == 'pull_request'
         uses: actions/github-script@v7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           script: |
             const fs = require('fs');
@@ -565,29 +567,37 @@ jobs:
             comment += `**Environment:** STAGING\n`;
             comment += `**Projects deployed:** ${projects.length}\n\n`;
             
-            comment += '### 📁 Projects\n\n';
-            for (const proj of projects) {
-              comment += `#### ${proj}\n\n`;
-              const fileList = `_changed_${proj}.txt`;
-              if (fs.existsSync(fileList)) {
-                const files = fs.readFileSync(fileList, 'utf8').trim().split('\n');
-                comment += '| File | Status |\n';
-                comment += '|------|--------|\n';
-                files.forEach(file => {
-                  const fileName = file.split('/').pop();
-                  const status = '${{ job.status }}' === 'success' ? '✅' : '❌';
-                  comment += `| \`${fileName}\` | ${status} |\n`;
-                });
-                comment += '\n';
+            if (projects.length > 0) {
+              comment += '### 📁 Projects\n\n';
+              for (const proj of projects) {
+                comment += `#### ${proj}\n\n`;
+                const fileList = `_changed_${proj}.txt`;
+                if (fs.existsSync(fileList)) {
+                  const files = fs.readFileSync(fileList, 'utf8').trim().split('\n');
+                  comment += '| File | Status |\n';
+                  comment += '|------|--------|\n';
+                  files.forEach(file => {
+                    const fileName = file.split('/').pop();
+                    const status = '${{ job.status }}' === 'success' ? '✅' : '❌';
+                    comment += `| \`${fileName}\` | ${status} |\n`;
+                  });
+                  comment += '\n';
+                }
               }
+            } else {
+              comment += 'No projects were deployed.\n\n';
             }
             
             comment += '\n---\n';
             comment += `_Deployed at ${new Date().toISOString()}_`;
             
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: comment
-            });
+            try {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            } catch (error) {
+              console.log('Could not create comment on PR:', error.message);
+            }
