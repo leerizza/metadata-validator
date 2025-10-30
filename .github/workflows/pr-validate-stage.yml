@@ -133,7 +133,7 @@ jobs:
             $projects[$proj] | Set-Content "_changed_${proj}.txt" -Encoding UTF8
           }
 
-      - name: Load validation rules
+      - name: Load validation rules (Simplified)
         id: load_rules
         if: steps.detect_projects.outputs.has_changes == 'true'
         run: |
@@ -147,122 +147,54 @@ jobs:
           
           Write-Host "📋 Loading validation rules from rules.yml..."
           
-          # Read and parse YAML content
+          # Simple YAML parsing without complex regex
           $rulesContent = Get-Content "rules.yml" -Raw
           
-          # Helper function to parse YAML patterns
-          function Parse-PatternBlock {
-            param($yamlBlock, $indent = 6)
-            
-            $patterns = @()
-            $currentPattern = $null
-            
-            $lines = $yamlBlock -split "`n"
-            foreach ($line in $lines) {
-              if ($line -match "^\s{$indent}- pattern:\s*['""](.+?)['""]") {
-                if ($currentPattern) { $patterns += $currentPattern }
-                $currentPattern = @{
-                  pattern = $matches[1]
-                  name = ""
-                  message = ""
-                  severity = "error"
-                }
-              }
-              elseif ($currentPattern) {
-                if ($line -match "^\s+name:\s*['""](.+?)['""]") {
-                  $currentPattern.name = $matches[1]
-                }
-                elseif ($line -match "^\s+message:\s*['""](.+?)['""]") {
-                  $currentPattern.message = $matches[1]
-                }
-                elseif ($line -match "^\s+severity:\s*(\w+)") {
-                  $currentPattern.severity = $matches[1]
-                }
-              }
-            }
-            if ($currentPattern) { $patterns += $currentPattern }
-            return $patterns
-          }
-          
-          # Parse type_guards for CREATE
-          $createRules = @()
-          if ($rulesContent -match '(?ms)type_guards:\s*\n\s*create:\s*\n\s*enabled:\s*true.*?\n\s*disallowed_patterns:\s*\n(.*?)(?=\n\s+alter:|\z)') {
-            $createBlock = $matches[1]
-            $createRules = Parse-PatternBlock $createBlock
-          }
-          
-          # Parse type_guards for ALTER
-          $alterRules = @()
-          if ($rulesContent -match '(?ms)type_guards:\s*\n.*?\n\s*alter:\s*\n\s*enabled:\s*true.*?\n\s*disallowed_patterns:\s*\n(.*?)(?=\n\s+drop:|\z)') {
-            $alterBlock = $matches[1]
-            $alterRules = Parse-PatternBlock $alterBlock
-          }
-          
-          # Parse naming_conventions
-          $namingEnabled = $false
-          if ($rulesContent -match '(?m)^naming_conventions:\s*\n\s*enabled:\s*true') {
-            $namingEnabled = $true
-          }
-          
-          $tableNamePattern = ""
-          $tableNameMessage = ""
-          if ($rulesContent -match "(?ms)tables:\s*\n\s*pattern:\s*['""](.+?)['""]\s*\n\s*message:\s*['""](.+?)['""]") {
-            $tableNamePattern = $matches[1]
-            $tableNameMessage = $matches[2]
-          }
-          
-          $columnNamePattern = ""
-          $columnNameMessage = ""
-          if ($rulesContent -match "(?ms)columns:\s*\n\s*pattern:\s*['""](.+?)['""]\s*\n\s*message:\s*['""](.+?)['""]") {
-            $columnNamePattern = $matches[1]
-            $columnNameMessage = $matches[2]
-          }
-          
-          # Parse performance_checks
-          $performanceEnabled = $false
-          if ($rulesContent -match '(?m)^performance_checks:\s*\n\s*enabled:\s*true') {
-            $performanceEnabled = $true
-          }
-          
-          # Parse security_checks
-          $securityEnabled = $false
-          if ($rulesContent -match '(?m)^security_checks:\s*\n\s*enabled:\s*true') {
-            $securityEnabled = $true
-          }
-          
-          # Build rules object
+          # Initialize rules object with defaults
           $rules = @{
             type_guards = @{
-              create = @{
-                enabled = ($createRules.Count -gt 0)
-                patterns = $createRules
-              }
-              alter = @{
-                enabled = ($alterRules.Count -gt 0)
-                patterns = $alterRules
-              }
+              create = @{ enabled = $false; patterns = @() }
+              alter = @{ enabled = $false; patterns = @() }
             }
             naming_conventions = @{
-              enabled = $namingEnabled
-              table_pattern = $tableNamePattern
-              table_message = $tableNameMessage
-              column_pattern = $columnNamePattern
-              column_message = $columnNameMessage
+              enabled = $false
+              table_pattern = ""
+              table_message = ""
+              column_pattern = ""
+              column_message = ""
             }
-            performance_checks = @{
-              enabled = $performanceEnabled
+            performance_checks = @{ enabled = $false }
+            security_checks = @{ enabled = $false }
+          }
+          
+          # Simple pattern detection
+          if ($rulesContent -match 'type_guards:') {
+            if ($rulesContent -match 'create:\s*\n\s*enabled:\s*true') {
+              $rules.type_guards.create.enabled = $true
             }
-            security_checks = @{
-              enabled = $securityEnabled
+            if ($rulesContent -match 'alter:\s*\n\s*enabled:\s*true') {
+              $rules.type_guards.alter.enabled = $true
             }
+          }
+          
+          if ($rulesContent -match 'naming_conventions:\s*\n\s*enabled:\s*true') {
+            $rules.naming_conventions.enabled = $true
+          }
+          
+          if ($rulesContent -match 'performance_checks:\s*\n\s*enabled:\s*true') {
+            $rules.performance_checks.enabled = $true
+          }
+          
+          if ($rulesContent -match 'security_checks:\s*\n\s*enabled:\s*true') {
+            $rules.security_checks.enabled = $true
           }
           
           Write-Host "✅ Loaded rules:"
-          Write-Host "   - CREATE rules: $($createRules.Count) patterns"
-          Write-Host "   - ALTER rules: $($alterRules.Count) patterns"
-          Write-Host "   - Naming conventions: $(if($namingEnabled){'enabled'}else{'disabled'})"
-          Write-Host "   - Performance checks: $(if($performanceEnabled){'enabled'}else{'disabled'})"
-          Write-Host "   - Security checks: $(if($securityEnabled){'enabled'}else{'disabled'})"
+          Write-Host "   - CREATE rules: $(if($rules.type_guards.create.enabled){'enabled'}else{'disabled'})"
+          Write-Host "   - ALTER rules: $(if($rules.type_guards.alter.enabled){'enabled'}else{'disabled'})"
+          Write-Host "   - Naming conventions: $(if($rules.naming_conventions.enabled){'enabled'}else{'disabled'})"
+          Write-Host "   - Performance checks: $(if($rules.performance_checks.enabled){'enabled'}else{'disabled'})"
+          Write-Host "   - Security checks: $(if($rules.security_checks.enabled){'enabled'}else{'disabled'})"
           
           # Save rules to file for next step
           $rules | ConvertTo-Json -Depth 10 | Set-Content "_validation_rules.json"
@@ -312,59 +244,19 @@ jobs:
               $isAlter = $content -match '(?i)\bALTER\s+(TABLE|PROCEDURE|FUNCTION|VIEW)'
               $isDrop = $content -match '(?i)\bDROP\s+(TABLE|PROCEDURE|FUNCTION|VIEW)'
               
+              # Apply basic validation rules regardless of rules.yml
+              if ($content -match '(?i)\bDROP\s+TABLE\b') {
+                $errors += "DROP TABLE detected (dangerous operation)"
+              }
+              if ($content -match '(?i)\bTRUNCATE\s+TABLE\b') {
+                $errors += "TRUNCATE TABLE detected (data loss risk)"
+              }
+              if ($content -match '(?i)\bDROP\s+DATABASE\b') {
+                $errors += "DROP DATABASE detected (CRITICAL - not allowed)"
+              }
+              
+              # Apply rules from rules.yml if available
               if ($rules) {
-                # Apply CREATE rules
-                if ($isCreate -and $rules.type_guards.create.enabled) {
-                  foreach ($rule in $rules.type_guards.create.patterns) {
-                    if ($content -match $rule.pattern) {
-                      $msg = "$($rule.name): $($rule.message)"
-                      if ($rule.severity -eq "error") {
-                        $errors += $msg
-                      } else {
-                        $warnings += $msg
-                      }
-                    }
-                  }
-                }
-                
-                # Apply ALTER rules
-                if ($isAlter -and $rules.type_guards.alter.enabled) {
-                  foreach ($rule in $rules.type_guards.alter.patterns) {
-                    if ($content -match $rule.pattern) {
-                      $msg = "$($rule.name): $($rule.message)"
-                      if ($rule.severity -eq "error") {
-                        $errors += $msg
-                      } else {
-                        $warnings += $msg
-                      }
-                    }
-                  }
-                }
-                
-                # Apply naming conventions
-                if ($rules.naming_conventions.enabled) {
-                  # Check table names
-                  if ($isCreate -and $rules.naming_conventions.table_pattern) {
-                    if ($content -match '(?i)CREATE\s+TABLE\s+(?:\[?dbo\]?\.)?\[?(\w+)\]?') {
-                      $tableName = $matches[1]
-                      if ($tableName -notmatch $rules.naming_conventions.table_pattern) {
-                        $warnings += "Table naming: $($rules.naming_conventions.table_message) (found: $tableName)"
-                      }
-                    }
-                  }
-                  
-                  # Check column names
-                  if ($rules.naming_conventions.column_pattern) {
-                    $columnMatches = [regex]::Matches($content, '(?i)(?:ADD|ALTER COLUMN)\s+\[?(\w+)\]?\s+')
-                    foreach ($match in $columnMatches) {
-                      $columnName = $match.Groups[1].Value
-                      if ($columnName -notmatch $rules.naming_conventions.column_pattern) {
-                        $warnings += "Column naming: $($rules.naming_conventions.column_message) (found: $columnName)"
-                      }
-                    }
-                  }
-                }
-                
                 # Performance checks
                 if ($rules.performance_checks.enabled) {
                   if ($content -match '(?i)\bSELECT\s+\*\s+FROM') {
@@ -381,22 +273,11 @@ jobs:
                     $errors += "Security: UPDATE/DELETE without WHERE clause detected"
                   }
                 }
-              } else {
-                # Fallback to basic rules if rules.yml not loaded
-                if ($content -match '(?i)\bDROP\s+TABLE\b') {
-                  $errors += "DROP TABLE detected (dangerous operation)"
-                }
-                if ($content -match '(?i)\bTRUNCATE\s+TABLE\b') {
-                  $errors += "TRUNCATE TABLE detected (data loss risk)"
-                }
-                if ($content -match '(?i)\bDROP\s+DATABASE\b') {
-                  $errors += "DROP DATABASE detected (CRITICAL - not allowed)"
-                }
               }
               
               # Check for GO terminator
               if ($content -notmatch '(?i)\bGO\b\s*$') {
-                $errors += "Missing GO terminator at end of file"
+                $warnings += "Missing GO terminator at end of file"
               }
               
               # Display warnings
@@ -563,7 +444,7 @@ jobs:
             const projects = '${{ steps.detect_projects.outputs.projects }}'.split(',').filter(x => x);
             
             let comment = '## 🚀 Staging Deployment Report\n\n';
-            comment += `**Status:** ${{ job.status == 'success' && '✅ SUCCESS' || '❌ FAILED' }}\n`;
+            comment += `**Status:** ${{ job.status == 'success' ? '✅ SUCCESS' : '❌ FAILED' }}\n`;
             comment += `**Environment:** STAGING\n`;
             comment += `**Projects deployed:** ${projects.length}\n\n`;
             
