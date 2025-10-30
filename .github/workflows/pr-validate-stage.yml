@@ -129,25 +129,36 @@ jobs:
             Write-Host "Analyzing: $file"
             $content = Get-Content $file -Raw
             
-            # Detect operation type (case-insensitive, multiline)
-            $hasCreate = $content -match '(?im)^\s*CREATE\s+(TABLE|PROCEDURE|FUNCTION|VIEW|INDEX)'
-            $hasAlter  = $content -match '(?im)^\s*ALTER\s+(TABLE|PROCEDURE|FUNCTION|VIEW)'
-            $hasDrop   = $content -match '(?im)^\s*DROP\s+(TABLE|PROCEDURE|FUNCTION|VIEW|INDEX)'
+            # Normalize content (remove comments, extra spaces)
+            $normalized = $content -replace '--[^\r\n]*', '' # Remove single-line comments
+            $normalized = $normalized -replace '/\*[\s\S]*?\*/', '' # Remove multi-line comments
+            $normalized = $normalized -replace '\s+', ' ' # Normalize whitespace
             
+            # Detect operation type (more lenient patterns)
+            $hasCreate = $normalized -match '(?i)\bCREATE\s+(TABLE|PROCEDURE|FUNCTION|VIEW|INDEX|TRIGGER)\b'
+            $hasAlter  = $normalized -match '(?i)\bALTER\s+(TABLE|PROCEDURE|FUNCTION|VIEW|DATABASE)\b'
+            $hasDrop   = $normalized -match '(?i)\bDROP\s+(TABLE|PROCEDURE|FUNCTION|VIEW|INDEX|TRIGGER)\b'
+            
+            # Debug: Show what was detected
+            Write-Host "  Content preview: $($content.Substring(0, [Math]::Min(200, $content.Length)))"
+            Write-Host "  Detection: CREATE=$hasCreate, ALTER=$hasAlter, DROP=$hasDrop"
+            
+            # Priority: DROP > ALTER > CREATE (in case of multiple operations in one file)
             if ($hasDrop) {
               $dropFiles += $file
-              Write-Host "  -> DROP detected"
+              Write-Host "  -> [DROP] File will be executed in DROP phase"
             }
             elseif ($hasAlter) {
               $alterFiles += $file
-              Write-Host "  -> ALTER detected"
+              Write-Host "  -> [ALTER] File will be executed in ALTER phase"
             }
             elseif ($hasCreate) {
               $createFiles += $file
-              Write-Host "  -> CREATE detected"
+              Write-Host "  -> [CREATE] File will be executed in CREATE phase"
             }
             else {
-              Write-Host "  -> [WARNING] No operation detected, skipping"
+              Write-Host "  -> [WARNING] No SQL operation detected, file will be SKIPPED"
+              Write-Host "     Make sure file contains CREATE, ALTER, or DROP statements"
             }
           }
           
