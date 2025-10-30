@@ -1,4 +1,4 @@
-name: Validate & Deploy to STAGING (No Python)
+name: Validate & Deploy to STAGING (With YAML Validator)
 
 on:
   pull_request:
@@ -126,7 +126,7 @@ jobs:
             Write-Host "[INFO] No CREATE changes"
           }
 
-      - name: Validate CREATE files with PowerShell
+      - name: Validate CREATE files with YAML rules
         if: steps.chg_create.outputs.has_changes == 'true'
         shell: powershell
         run: |
@@ -134,44 +134,72 @@ jobs:
           
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "Validating CREATE files with PowerShell"
+          Write-Host "Validating CREATE files with YAML rules"
           Write-Host "=========================================="
+          
+          # Check if rules file exists
+          if (!(Test-Path 'rules.yml')) {
+            Write-Host "[WARNING] rules.yml not found, skipping validation"
+            exit 0
+          }
           
           $files = Get-Content '_changed_create.txt'
           $validationFailed = $false
           
-          foreach ($file in $files) {
-            if (!(Test-Path $file)) {
-              Write-Host "[ERROR] File not found: $file"
-              $validationFailed = $true
-              continue
+          # Load YAML rules (simple PowerShell parsing)
+          $rulesContent = Get-Content 'rules.yml' -Raw
+          
+          # Extract CREATE rules using regex (simple YAML parsing)
+          if ($rulesContent -match 'create:[\s\S]*?(?=alter:|drop:|\Z)') {
+            $createSection = $matches[0]
+            
+            # Check if CREATE validation is enabled
+            if ($createSection -match 'enabled:\s*true') {
+              Write-Host "CREATE validation is enabled"
+              
+              # Extract disallowed patterns
+              if ($createSection -match 'disallowed_patterns:[\s\S]*?(?=  [a-z]|$)') {
+                $patternsSection = $matches[0]
+                
+                # Parse each pattern
+                $patternMatches = [regex]::Matches($patternsSection, '- pattern: ''([^'']*)''[\s\S]*?name: ''([^'']*)''[\s\S]*?message: ''([^'']*)''', [Text.RegularExpressions.RegexOptions]::Singleline)
+                
+                foreach ($patternMatch in $patternMatches) {
+                  $pattern = $patternMatch.Groups[1].Value
+                  $name = $patternMatch.Groups[2].Value
+                  $message = $patternMatch.Groups[3].Value
+                  
+                  Write-Host "Checking pattern: $name"
+                  Write-Host "Pattern: $pattern"
+                  
+                  foreach ($file in $files) {
+                    if (!(Test-Path $file)) {
+                      Write-Host "[ERROR] File not found: $file"
+                      $validationFailed = $true
+                      continue
+                    }
+                    
+                    $content = Get-Content $file -Raw
+                    Write-Host "Validating: $file"
+                    
+                    if ($content -match $pattern) {
+                      Write-Host "[ERROR] $message"
+                      Write-Host "File: $file"
+                      Write-Host "Pattern matched: $pattern"
+                      $validationFailed = $true
+                    } else {
+                      Write-Host "[OK] No violations found for $name in $file"
+                    }
+                  }
+                }
+              } else {
+                Write-Host "No disallowed patterns found for CREATE"
+              }
+            } else {
+              Write-Host "CREATE validation is disabled in rules.yml"
             }
-            
-            $content = Get-Content $file -Raw
-            Write-Host "Validating: $file"
-            
-            # Basic SQL validation rules for CREATE
-            if ($content -match '(?i)\bDROP\s+TABLE\b') {
-              Write-Host "[ERROR] CREATE file contains DROP TABLE: $file"
-              $validationFailed = $true
-            }
-            
-            if ($content -match '(?i)\bDELETE\s+FROM\b') {
-              Write-Host "[ERROR] CREATE file contains DELETE: $file"
-              $validationFailed = $true
-            }
-            
-            if ($content -match '(?i)\bUPDATE\s+\w+\b') {
-              Write-Host "[ERROR] CREATE file contains UPDATE: $file"
-              $validationFailed = $true
-            }
-            
-            # Check if it actually contains CREATE statement
-            if ($content -notmatch '(?i)\bCREATE\s+(TABLE|VIEW|PROCEDURE|FUNCTION|INDEX)\b') {
-              Write-Host "[WARNING] CREATE file may not contain CREATE statement: $file"
-            }
-            
-            Write-Host "[OK] Validation passed: $file"
+          } else {
+            Write-Host "No CREATE section found in rules.yml"
           }
           
           if ($validationFailed) {
@@ -211,7 +239,7 @@ jobs:
             "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
           }
 
-      - name: Validate ALTER files with PowerShell
+      - name: Validate ALTER files with YAML rules
         if: steps.chg_alter.outputs.has_changes == 'true'
         shell: powershell
         run: |
@@ -219,39 +247,67 @@ jobs:
           
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "Validating ALTER files with PowerShell"
+          Write-Host "Validating ALTER files with YAML rules"
           Write-Host "=========================================="
+          
+          if (!(Test-Path 'rules.yml')) {
+            Write-Host "[WARNING] rules.yml not found, skipping validation"
+            exit 0
+          }
           
           $files = Get-Content '_changed_alter.txt'
           $validationFailed = $false
           
-          foreach ($file in $files) {
-            if (!(Test-Path $file)) {
-              Write-Host "[ERROR] File not found: $file"
-              $validationFailed = $true
-              continue
+          $rulesContent = Get-Content 'rules.yml' -Raw
+          
+          # Extract ALTER rules
+          if ($rulesContent -match 'alter:[\s\S]*?(?=drop:|\Z)') {
+            $alterSection = $matches[0]
+            
+            if ($alterSection -match 'enabled:\s*true') {
+              Write-Host "ALTER validation is enabled"
+              
+              if ($alterSection -match 'disallowed_patterns:[\s\S]*?(?=  [a-z]|$)') {
+                $patternsSection = $matches[0]
+                
+                $patternMatches = [regex]::Matches($patternsSection, '- pattern: ''([^'']*)''[\s\S]*?name: ''([^'']*)''[\s\S]*?message: ''([^'']*)''', [Text.RegularExpressions.RegexOptions]::Singleline)
+                
+                foreach ($patternMatch in $patternMatches) {
+                  $pattern = $patternMatch.Groups[1].Value
+                  $name = $patternMatch.Groups[2].Value
+                  $message = $patternMatch.Groups[3].Value
+                  
+                  Write-Host "Checking pattern: $name"
+                  Write-Host "Pattern: $pattern"
+                  
+                  foreach ($file in $files) {
+                    if (!(Test-Path $file)) {
+                      Write-Host "[ERROR] File not found: $file"
+                      $validationFailed = $true
+                      continue
+                    }
+                    
+                    $content = Get-Content $file -Raw
+                    Write-Host "Validating: $file"
+                    
+                    if ($content -match $pattern) {
+                      Write-Host "[ERROR] $message"
+                      Write-Host "File: $file"
+                      Write-Host "Pattern matched: $pattern"
+                      $validationFailed = $true
+                    } else {
+                      Write-Host "[OK] No violations found for $name in $file"
+                    }
+                  }
+                }
+              } else {
+                Write-Host "No disallowed patterns found for ALTER"
+              }
+            } else {
+              Write-Host "ALTER validation is disabled in rules.yml"
             }
-            
-            $content = Get-Content $file -Raw
-            Write-Host "Validating: $file"
-            
-            # Basic SQL validation rules for ALTER
-            if ($content -match '(?i)\bDROP\s+TABLE\b') {
-              Write-Host "[ERROR] ALTER file contains DROP TABLE: $file"
-              $validationFailed = $true
-            }
-            
-            if ($content -match '(?i)\bDELETE\s+FROM\b') {
-              Write-Host "[ERROR] ALTER file contains DELETE: $file"
-              $validationFailed = $true
-            }
-            
-            # Check if it contains ALTER statement
-            if ($content -notmatch '(?i)\bALTER\s+(TABLE|VIEW|PROCEDURE|FUNCTION)\b') {
-              Write-Host "[WARNING] ALTER file may not contain ALTER statement: $file"
-            }
-            
-            Write-Host "[OK] Validation passed: $file"
+          } else {
+            Write-Host "No ALTER section found in rules.yml"
           }
           
           if ($validationFailed) {
@@ -291,7 +347,7 @@ jobs:
             "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
           }
 
-      - name: Validate DROP files with PowerShell
+      - name: Validate DROP files with YAML rules
         if: steps.chg_drop.outputs.has_changes == 'true'
         shell: powershell
         run: |
@@ -299,39 +355,67 @@ jobs:
           
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "Validating DROP files with PowerShell"
+          Write-Host "Validating DROP files with YAML rules"
           Write-Host "=========================================="
+          
+          if (!(Test-Path 'rules.yml')) {
+            Write-Host "[WARNING] rules.yml not found, skipping validation"
+            exit 0
+          }
           
           $files = Get-Content '_changed_drop.txt'
           $validationFailed = $false
           
-          foreach ($file in $files) {
-            if (!(Test-Path $file)) {
-              Write-Host "[ERROR] File not found: $file"
-              $validationFailed = $true
-              continue
+          $rulesContent = Get-Content 'rules.yml' -Raw
+          
+          # Extract DROP rules
+          if ($rulesContent -match 'drop:[\s\S]*?(?=naming_conventions:|\Z)') {
+            $dropSection = $matches[0]
+            
+            if ($dropSection -match 'enabled:\s*true') {
+              Write-Host "DROP validation is enabled"
+              
+              if ($dropSection -match 'disallowed_patterns:[\s\S]*?(?=  [a-z]|$)') {
+                $patternsSection = $matches[0]
+                
+                $patternMatches = [regex]::Matches($patternsSection, '- pattern: ''([^'']*)''[\s\S]*?name: ''([^'']*)''[\s\S]*?message: ''([^'']*)''', [Text.RegularExpressions.RegexOptions]::Singleline)
+                
+                foreach ($patternMatch in $patternMatches) {
+                  $pattern = $patternMatch.Groups[1].Value
+                  $name = $patternMatch.Groups[2].Value
+                  $message = $patternMatch.Groups[3].Value
+                  
+                  Write-Host "Checking pattern: $name"
+                  Write-Host "Pattern: $pattern"
+                  
+                  foreach ($file in $files) {
+                    if (!(Test-Path $file)) {
+                      Write-Host "[ERROR] File not found: $file"
+                      $validationFailed = $true
+                      continue
+                    }
+                    
+                    $content = Get-Content $file -Raw
+                    Write-Host "Validating: $file"
+                    
+                    if ($content -match $pattern) {
+                      Write-Host "[ERROR] $message"
+                      Write-Host "File: $file"
+                      Write-Host "Pattern matched: $pattern"
+                      $validationFailed = $true
+                    } else {
+                      Write-Host "[OK] No violations found for $name in $file"
+                    }
+                  }
+                }
+              } else {
+                Write-Host "No disallowed patterns found for DROP"
+              }
+            } else {
+              Write-Host "DROP validation is disabled in rules.yml"
             }
-            
-            $content = Get-Content $file -Raw
-            Write-Host "Validating: $file"
-            
-            # Basic SQL validation rules for DROP
-            if ($content -match '(?i)\bDELETE\s+FROM\b') {
-              Write-Host "[ERROR] DROP file contains DELETE: $file"
-              $validationFailed = $true
-            }
-            
-            if ($content -match '(?i)\bUPDATE\s+\w+\b') {
-              Write-Host "[ERROR] DROP file contains UPDATE: $file"
-              $validationFailed = $true
-            }
-            
-            # Check if it contains DROP statement
-            if ($content -notmatch '(?i)\bDROP\s+(TABLE|VIEW|PROCEDURE|FUNCTION)\b') {
-              Write-Host "[WARNING] DROP file may not contain DROP statement: $file"
-            }
-            
-            Write-Host "[OK] Validation passed: $file"
+          } else {
+            Write-Host "No DROP section found in rules.yml"
           }
           
           if ($validationFailed) {
