@@ -137,73 +137,209 @@ jobs:
           Write-Host "Validating CREATE files with YAML rules"
           Write-Host "=========================================="
           
-          # Check if rules file exists
           if (!(Test-Path 'rules.yml')) {
             Write-Host "[WARNING] rules.yml not found, skipping validation"
             exit 0
           }
           
-          $files = Get-Content '_changed_create.txt'
-          $validationFailed = $false
+          $files = Get-Content '_changed_create.txt' -ErrorAction SilentlyContinue
+          if (!$files -or $files.Count -eq 0) {
+            Write-Host "No CREATE files to validate"
+            exit 0
+          }
           
-          # Load YAML rules (simple PowerShell parsing)
+          $validationFailed = $false
           $rulesContent = Get-Content 'rules.yml' -Raw
           
-          # Extract CREATE rules using regex (simple YAML parsing)
-          if ($rulesContent -match 'create:[\s\S]*?(?=alter:|drop:|\Z)') {
-            $createSection = $matches[0]
+          Write-Host "Checking type_guards.create rules..."
+          
+          # TYPE_GUARDS - CREATE
+          if ($rulesContent -match 'type_guards:') {
+            $typeGuardsSection = $rulesContent -split 'type_guards:' | Select-Object -Skip 1 | Select-Object -First 1
+            $typeGuardsSection = $typeGuardsSection -split 'naming_conventions:' | Select-Object -First 1
             
-            # Check if CREATE validation is enabled
-            if ($createSection -match 'enabled:\s*true') {
-              Write-Host "CREATE validation is enabled"
+            if ($typeGuardsSection -match 'create:') {
+              $createSection = $typeGuardsSection -split 'create:' | Select-Object -Skip 1 | Select-Object -First 1
+              $createSection = $createSection -split 'alter:' | Select-Object -First 1
               
-              # Extract disallowed patterns
-              if ($createSection -match 'disallowed_patterns:[\s\S]*?(?=  [a-z]|$)') {
-                $patternsSection = $matches[0]
+              if ($createSection -match 'enabled:\s*true') {
+                Write-Host "CREATE type_guards validation is ENABLED"
                 
-                # Parse each pattern
-                $patternMatches = [regex]::Matches($patternsSection, '- pattern: ''([^'']*)''[\s\S]*?name: ''([^'']*)''[\s\S]*?message: ''([^'']*)''', [Text.RegularExpressions.RegexOptions]::Singleline)
-                
-                foreach ($patternMatch in $patternMatches) {
-                  $pattern = $patternMatch.Groups[1].Value
-                  $name = $patternMatch.Groups[2].Value
-                  $message = $patternMatch.Groups[3].Value
+                $patterns = @()
+                if ($createSection -match 'disallowed_patterns:') {
+                  $patternsSection = $createSection -split 'disallowed_patterns:' | Select-Object -Skip 1 | Select-Object -First 1
+                  $patternsSection = $patternsSection -split 'naming_conventions:' | Select-Object -First 1
                   
-                  Write-Host "Checking pattern: $name"
-                  Write-Host "Pattern: $pattern"
+                  $patternBlocks = [regex]::Matches($patternsSection, '- pattern:.*?(?=\n\s+- pattern:|\n\s+[a-z_]+:|\Z)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
                   
-                  foreach ($file in $files) {
-                    if (!(Test-Path $file)) {
-                      Write-Host "[ERROR] File not found: $file"
-                      $validationFailed = $true
-                      continue
-                    }
-                    
-                    $content = Get-Content $file -Raw
-                    Write-Host "Validating: $file"
-                    
-                    if ($content -match $pattern) {
-                      Write-Host "[ERROR] $message"
-                      Write-Host "File: $file"
-                      Write-Host "Pattern matched: $pattern"
-                      $validationFailed = $true
-                    } else {
-                      Write-Host "[OK] No violations found for $name in $file"
+                  foreach ($block in $patternBlocks) {
+                    $blockContent = $block.Value
+                    if ($blockContent -match "pattern:\s*'([^']*)'") {
+                      $pattern = $matches[1]
+                      $name = "Unknown"
+                      if ($blockContent -match "name:\s*'([^']*)'") { $name = $matches[1] }
+                      $message = "Validation failed"
+                      if ($blockContent -match "message:\s*'([^']*)'") { $message = $matches[1] }
+                      
+                      Write-Host "  Rule: $name - $pattern"
+                      $patterns += @{ Name = $name; Pattern = $pattern; Message = $message }
                     }
                   }
                 }
-              } else {
-                Write-Host "No disallowed patterns found for CREATE"
+                
+                # Apply type_guards validation
+                foreach ($file in $files) {
+                  $file = $file.Trim()
+                  if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
+                  
+                  $content = Get-Content $file -Raw
+                  Write-Host "Validating type_guards: $file"
+                  
+                  foreach ($rule in $patterns) {
+                    if ($content -match $rule.Pattern) {
+                      Write-Host "[TYPE_GUARDS ERROR] $($rule.Message)" -ForegroundColor Red
+                      Write-Host "  File: $file" -ForegroundColor Red
+                      Write-Host "  Pattern: $($rule.Pattern)" -ForegroundColor Red
+                      $validationFailed = $true
+                    }
+                  }
+                }
               }
-            } else {
-              Write-Host "CREATE validation is disabled in rules.yml"
             }
-          } else {
-            Write-Host "No CREATE section found in rules.yml"
+          }
+          
+          # NAMING_CONVENTIONS - CREATE
+          if ($rulesContent -match 'naming_conventions:') {
+            $namingSection = $rulesContent -split 'naming_conventions:' | Select-Object -Skip 1 | Select-Object -First 1
+            $namingSection = $namingSection -split 'performance_checks:' | Select-Object -First 1
+            
+            if ($namingSection -match 'enabled:\s*true') {
+              Write-Host "NAMING_CONVENTIONS validation is ENABLED"
+              
+              # Table naming rules
+              if ($namingSection -match 'tables:') {
+                $tablesSection = $namingSection -split 'tables:' | Select-Object -Skip 1 | Select-Object -First 1
+                $tablesSection = $tablesSection -split 'columns:' | Select-Object -First 1
+                
+                if ($tablesSection -match "pattern:\s*'([^']*)'") {
+                  $tablePattern = $matches[1]
+                  $tableMessage = "Table naming convention violation"
+                  if ($tablesSection -match "message:\s*'([^']*)'") { $tableMessage = $matches[1] }
+                  
+                  Write-Host "  Table pattern: $tablePattern"
+                  
+                  foreach ($file in $files) {
+                    $file = $file.Trim()
+                    if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
+                    
+                    $content = Get-Content $file -Raw
+                    # Extract table names from CREATE TABLE statements
+                    if ($content -match '(?i)CREATE\s+TABLE\s+[\[\]]?(\w+)[\[\]]?') {
+                      $tableName = $matches[1]
+                      if ($tableName -notmatch $tablePattern) {
+                        Write-Host "[NAMING ERROR] $tableMessage: $tableName" -ForegroundColor Red
+                        Write-Host "  File: $file" -ForegroundColor Red
+                        $validationFailed = $true
+                      }
+                    }
+                  }
+                }
+              }
+              
+              # Column naming rules
+              if ($namingSection -match 'columns:') {
+                $columnsSection = $namingSection -split 'columns:' | Select-Object -Skip 1 | Select-Object -First 1
+                $columnsSection = $columnsSection -split 'performance_checks:' | Select-Object -First 1
+                
+                if ($columnsSection -match "pattern:\s*'([^']*)'") {
+                  $columnPattern = $matches[1]
+                  $columnMessage = "Column naming convention violation"
+                  if ($columnsSection -match "message:\s*'([^']*)'") { $columnMessage = $matches[1] }
+                  
+                  Write-Host "  Column pattern: $columnPattern"
+                  
+                  foreach ($file in $files) {
+                    $file = $file.Trim()
+                    if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
+                    
+                    $content = Get-Content $file -Raw
+                    # Extract column names (simple pattern)
+                    $columnMatches = [regex]::Matches($content, '\[?(\w+)\]?\s+(?:INT|VARCHAR|NVARCHAR|DECIMAL|DATETIME|BIT)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                    foreach ($match in $columnMatches) {
+                      $columnName = $match.Groups[1].Value
+                      if ($columnName -notmatch $columnPattern) {
+                        Write-Host "[NAMING ERROR] $columnMessage: $columnName" -ForegroundColor Red
+                        Write-Host "  File: $file" -ForegroundColor Red
+                        $validationFailed = $true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          
+          # PERFORMANCE_CHECKS - CREATE
+          if ($rulesContent -match 'performance_checks:') {
+            $performanceSection = $rulesContent -split 'performance_checks:' | Select-Object -Skip 1 | Select-Object -First 1
+            $performanceSection = $performanceSection -split 'security_checks:' | Select-Object -First 1
+            
+            if ($performanceSection -match 'enabled:\s*true') {
+              Write-Host "PERFORMANCE_CHECKS validation is ENABLED"
+              
+              if ($performanceSection -match 'rules:') {
+                $rulesSection = $performanceSection -split 'rules:' | Select-Object -Skip 1 | Select-Object -First 1
+                
+                # Check for SELECT * usage
+                if ($rulesSection -match 'SELECT \* usage') {
+                  foreach ($file in $files) {
+                    $file = $file.Trim()
+                    if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
+                    
+                    $content = Get-Content $file -Raw
+                    if ($content -match 'SELECT\s+\*') {
+                      Write-Host "[PERFORMANCE WARNING] SELECT * usage detected" -ForegroundColor Yellow
+                      Write-Host "  File: $file" -ForegroundColor Yellow
+                    }
+                  }
+                }
+              }
+            }
+          }
+          
+          # SECURITY_CHECKS - CREATE
+          if ($rulesContent -match 'security_checks:') {
+            $securitySection = $rulesContent -split 'security_checks:' | Select-Object -Skip 1 | Select-Object -First 1
+            
+            if ($securitySection -match 'enabled:\s*true') {
+              Write-Host "SECURITY_CHECKS validation is ENABLED"
+              
+              if ($securitySection -match 'rules:') {
+                $rulesSection = $securitySection -split 'rules:' | Select-Object -Skip 1 | Select-Object -First 1
+                
+                # Check for missing WHERE clause
+                if ($rulesSection -match 'Missing WHERE clause in UPDATE/DELETE') {
+                  foreach ($file in $files) {
+                    $file = $file.Trim()
+                    if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
+                    
+                    $content = Get-Content $file -Raw
+                    if ($content -match '(?i)(UPDATE\s+\w+\s+SET|DELETE\s+FROM\s+\w+)(?!(.|\n)*WHERE)') {
+                      Write-Host "[SECURITY ERROR] Missing WHERE clause in UPDATE/DELETE" -ForegroundColor Red
+                      Write-Host "  File: $file" -ForegroundColor Red
+                      $validationFailed = $true
+                    }
+                  }
+                }
+              }
+            }
           }
           
           if ($validationFailed) {
-            throw "SQL validation failed for CREATE files"
+            Write-Host "`n[VALIDATION FAILED] CREATE files contain validation errors" -ForegroundColor Red
+            exit 1
+          } else {
+            Write-Host "`n[SUCCESS] All CREATE files passed validation" -ForegroundColor Green
           }
 
       - name: Compute ALTER changes
@@ -219,14 +355,18 @@ jobs:
 
           $all = @()
           if (Test-Path 'deploy/alter') {
-            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/alter/**/*.sql" 2>$null
-            $wt   = git ls-files -mo --exclude-standard -- "deploy/alter/**/*.sql" 2>$null
+            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/alter/*.sql" "deploy/alter/**/*.sql" 2>$null
+            $wt   = git ls-files -mo --exclude-standard -- "deploy/alter/*.sql" "deploy/alter/**/*.sql" 2>$null
             if($diff){ $all+=$diff }
             if($wt){ $all+=$wt }
             $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
           }
 
           Write-Host "Found $($all.Count) ALTER file(s)"
+          if ($all.Count -gt 0) {
+            Write-Host "ALTER files:"
+            $all | ForEach-Object { Write-Host "   - $_" }
+          }
 
           $outFile = '_changed_alter.txt'
           if ($all.Count -gt 0) {
@@ -255,63 +395,79 @@ jobs:
             exit 0
           }
           
-          $files = Get-Content '_changed_alter.txt'
-          $validationFailed = $false
+          $files = Get-Content '_changed_alter.txt' -ErrorAction SilentlyContinue
+          if (!$files -or $files.Count -eq 0) {
+            Write-Host "No ALTER files to validate"
+            exit 0
+          }
           
+          $validationFailed = $false
           $rulesContent = Get-Content 'rules.yml' -Raw
           
-          # Extract ALTER rules
-          if ($rulesContent -match 'alter:[\s\S]*?(?=drop:|\Z)') {
-            $alterSection = $matches[0]
+          Write-Host "Checking type_guards.alter rules..."
+          
+          # TYPE_GUARDS - ALTER
+          if ($rulesContent -match 'type_guards:') {
+            $typeGuardsSection = $rulesContent -split 'type_guards:' | Select-Object -Skip 1 | Select-Object -First 1
+            $typeGuardsSection = $typeGuardsSection -split 'naming_conventions:' | Select-Object -First 1
             
-            if ($alterSection -match 'enabled:\s*true') {
-              Write-Host "ALTER validation is enabled"
+            if ($typeGuardsSection -match 'alter:') {
+              $alterSection = $typeGuardsSection -split 'alter:' | Select-Object -Skip 1 | Select-Object -First 1
+              $alterSection = $alterSection -split 'drop:' | Select-Object -First 1
               
-              if ($alterSection -match 'disallowed_patterns:[\s\S]*?(?=  [a-z]|$)') {
-                $patternsSection = $matches[0]
+              if ($alterSection -match 'enabled:\s*true') {
+                Write-Host "ALTER type_guards validation is ENABLED"
                 
-                $patternMatches = [regex]::Matches($patternsSection, '- pattern: ''([^'']*)''[\s\S]*?name: ''([^'']*)''[\s\S]*?message: ''([^'']*)''', [Text.RegularExpressions.RegexOptions]::Singleline)
-                
-                foreach ($patternMatch in $patternMatches) {
-                  $pattern = $patternMatch.Groups[1].Value
-                  $name = $patternMatch.Groups[2].Value
-                  $message = $patternMatch.Groups[3].Value
+                $patterns = @()
+                if ($alterSection -match 'disallowed_patterns:') {
+                  $patternsSection = $alterSection -split 'disallowed_patterns:' | Select-Object -Skip 1 | Select-Object -First 1
                   
-                  Write-Host "Checking pattern: $name"
-                  Write-Host "Pattern: $pattern"
+                  $patternBlocks = [regex]::Matches($patternsSection, '- pattern:.*?(?=\n\s+- pattern:|\n\s+[a-z_]+:|\Z)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
                   
-                  foreach ($file in $files) {
-                    if (!(Test-Path $file)) {
-                      Write-Host "[ERROR] File not found: $file"
-                      $validationFailed = $true
-                      continue
-                    }
-                    
-                    $content = Get-Content $file -Raw
-                    Write-Host "Validating: $file"
-                    
-                    if ($content -match $pattern) {
-                      Write-Host "[ERROR] $message"
-                      Write-Host "File: $file"
-                      Write-Host "Pattern matched: $pattern"
-                      $validationFailed = $true
-                    } else {
-                      Write-Host "[OK] No violations found for $name in $file"
+                  foreach ($block in $patternBlocks) {
+                    $blockContent = $block.Value
+                    if ($blockContent -match "pattern:\s*'([^']*)'") {
+                      $pattern = $matches[1]
+                      $name = "Unknown"
+                      if ($blockContent -match "name:\s*'([^']*)'") { $name = $matches[1] }
+                      $message = "Validation failed"
+                      if ($blockContent -match "message:\s*'([^']*)'") { $message = $matches[1] }
+                      
+                      Write-Host "  Rule: $name - $pattern"
+                      $patterns += @{ Name = $name; Pattern = $pattern; Message = $message }
                     }
                   }
                 }
-              } else {
-                Write-Host "No disallowed patterns found for ALTER"
+                
+                # Apply type_guards validation
+                foreach ($file in $files) {
+                  $file = $file.Trim()
+                  if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
+                  
+                  $content = Get-Content $file -Raw
+                  Write-Host "Validating type_guards: $file"
+                  
+                  foreach ($rule in $patterns) {
+                    if ($content -match $rule.Pattern) {
+                      Write-Host "[TYPE_GUARDS ERROR] $($rule.Message)" -ForegroundColor Red
+                      Write-Host "  File: $file" -ForegroundColor Red
+                      Write-Host "  Pattern: $($rule.Pattern)" -ForegroundColor Red
+                      $validationFailed = $true
+                    }
+                  }
+                }
               }
-            } else {
-              Write-Host "ALTER validation is disabled in rules.yml"
             }
-          } else {
-            Write-Host "No ALTER section found in rules.yml"
           }
           
+          # Note: Untuk ALTER, naming_conventions, performance_checks, dan security_checks 
+          # bisa ditambahkan dengan logika serperti CREATE jika diperlukan
+          
           if ($validationFailed) {
-            throw "SQL validation failed for ALTER files"
+            Write-Host "`n[VALIDATION FAILED] ALTER files contain validation errors" -ForegroundColor Red
+            exit 1
+          } else {
+            Write-Host "`n[SUCCESS] All ALTER files passed validation" -ForegroundColor Green
           }
 
       - name: Compute DROP changes
@@ -363,63 +519,77 @@ jobs:
             exit 0
           }
           
-          $files = Get-Content '_changed_drop.txt'
-          $validationFailed = $false
+          $files = Get-Content '_changed_drop.txt' -ErrorAction SilentlyContinue
+          if (!$files -or $files.Count -eq 0) {
+            Write-Host "No DROP files to validate"
+            exit 0
+          }
           
+          $validationFailed = $false
           $rulesContent = Get-Content 'rules.yml' -Raw
           
-          # Extract DROP rules
-          if ($rulesContent -match 'drop:[\s\S]*?(?=naming_conventions:|\Z)') {
-            $dropSection = $matches[0]
+          Write-Host "Checking type_guards.drop rules..."
+          
+          # TYPE_GUARDS - DROP
+          if ($rulesContent -match 'type_guards:') {
+            $typeGuardsSection = $rulesContent -split 'type_guards:' | Select-Object -Skip 1 | Select-Object -First 1
             
-            if ($dropSection -match 'enabled:\s*true') {
-              Write-Host "DROP validation is enabled"
+            if ($typeGuardsSection -match 'drop:') {
+              $dropSection = $typeGuardsSection -split 'drop:' | Select-Object -Skip 1 | Select-Object -First 1
+              $dropSection = $dropSection -split 'naming_conventions:' | Select-Object -First 1
               
-              if ($dropSection -match 'disallowed_patterns:[\s\S]*?(?=  [a-z]|$)') {
-                $patternsSection = $matches[0]
+              if ($dropSection -match 'enabled:\s*true') {
+                Write-Host "DROP type_guards validation is ENABLED"
                 
-                $patternMatches = [regex]::Matches($patternsSection, '- pattern: ''([^'']*)''[\s\S]*?name: ''([^'']*)''[\s\S]*?message: ''([^'']*)''', [Text.RegularExpressions.RegexOptions]::Singleline)
-                
-                foreach ($patternMatch in $patternMatches) {
-                  $pattern = $patternMatch.Groups[1].Value
-                  $name = $patternMatch.Groups[2].Value
-                  $message = $patternMatch.Groups[3].Value
+                $patterns = @()
+                if ($dropSection -match 'disallowed_patterns:') {
+                  $patternsSection = $dropSection -split 'disallowed_patterns:' | Select-Object -Skip 1 | Select-Object -First 1
                   
-                  Write-Host "Checking pattern: $name"
-                  Write-Host "Pattern: $pattern"
+                  $patternBlocks = [regex]::Matches($patternsSection, '- pattern:.*?(?=\n\s+- pattern:|\n\s+[a-z_]+:|\Z)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
                   
-                  foreach ($file in $files) {
-                    if (!(Test-Path $file)) {
-                      Write-Host "[ERROR] File not found: $file"
-                      $validationFailed = $true
-                      continue
+                  foreach ($block in $patternBlocks) {
+                    $blockContent = $block.Value
+                    if ($blockContent -match "pattern:\s*'([^']*)'") {
+                      $pattern = $matches[1]
+                      $name = "Unknown"
+                      if ($blockContent -match "name:\s*'([^']*)'") { $name = $matches[1] }
+                      $message = "Validation failed"
+                      if ($blockContent -match "message:\s*'([^']*)'") { $message = $matches[1] }
+                      
+                      Write-Host "  Rule: $name - $pattern"
+                      $patterns += @{ Name = $name; Pattern = $pattern; Message = $message }
                     }
-                    
-                    $content = Get-Content $file -Raw
-                    Write-Host "Validating: $file"
-                    
-                    if ($content -match $pattern) {
-                      Write-Host "[ERROR] $message"
-                      Write-Host "File: $file"
-                      Write-Host "Pattern matched: $pattern"
+                  }
+                }
+                
+                # Apply type_guards validation
+                foreach ($file in $files) {
+                  $file = $file.Trim()
+                  if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
+                  
+                  $content = Get-Content $file -Raw
+                  Write-Host "Validating type_guards: $file"
+                  
+                  foreach ($rule in $patterns) {
+                    if ($content -match $rule.Pattern) {
+                      Write-Host "[TYPE_GUARDS ERROR] $($rule.Message)" -ForegroundColor Red
+                      Write-Host "  File: $file" -ForegroundColor Red
+                      Write-Host "  Pattern: $($rule.Pattern)" -ForegroundColor Red
                       $validationFailed = $true
-                    } else {
-                      Write-Host "[OK] No violations found for $name in $file"
                     }
                   }
                 }
               } else {
-                Write-Host "No disallowed patterns found for DROP"
+                Write-Host "DROP type_guards validation is DISABLED"
               }
-            } else {
-              Write-Host "DROP validation is disabled in rules.yml"
             }
-          } else {
-            Write-Host "No DROP section found in rules.yml"
           }
           
           if ($validationFailed) {
-            throw "SQL validation failed for DROP files"
+            Write-Host "`n[VALIDATION FAILED] DROP files contain validation errors" -ForegroundColor Red
+            exit 1
+          } else {
+            Write-Host "`n[SUCCESS] All DROP files passed validation" -ForegroundColor Green
           }
 
       - name: Upload change lists
@@ -444,6 +614,7 @@ jobs:
           Write-Host "DROP files:   ${{ steps.chg_drop.outputs.file_count }}"
           Write-Host "========================================="
 
+  # Deploy jobs remain the same...
   deploy_create_stg:
     needs: setup
     if: needs.setup.outputs.create_changed == 'true' && needs.setup.outputs.create_count != '0'
