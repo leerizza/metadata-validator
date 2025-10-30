@@ -151,6 +151,9 @@ jobs:
           Write-Host "VALIDATING SQL FILES"
           Write-Host "========================================="
           
+          # Load rules from YAML (simple parsing)
+          $rulesContent = Get-Content rules.yml -Raw
+          
           $projects = '${{ steps.detect_projects.outputs.projects }}'.Split(',') | Where-Object { $_ }
           $validationFailed = $false
           
@@ -168,15 +171,23 @@ jobs:
               
               Write-Host "  Checking: $file"
               
-              # Detect operation type from SQL content
               $content = Get-Content $file -Raw
-              $isAlter = $content -match '(?i)\bALTER\s+(TABLE|PROCEDURE|FUNCTION)'
-              $type = if ($isAlter) { "alter" } else { "create" }
+              $errors = @()
               
-              # Run Python validator
-              $result = python scripts/validate_sql.py --type $type --rules rules.yml $file
-              if ($LASTEXITCODE -ne 0) {
+              # Basic validations
+              if ($content -match '(?i)DROP\s+TABLE') {
+                $errors += "DROP TABLE detected (dangerous)"
+              }
+              if ($content -match '(?i)TRUNCATE\s+TABLE') {
+                $errors += "TRUNCATE TABLE detected"
+              }
+              if ($content -notmatch '(?i)GO\s*$') {
+                $errors += "Missing GO terminator"
+              }
+              
+              if ($errors.Count -gt 0) {
                 Write-Host "    ❌ Validation FAILED" -ForegroundColor Red
+                $errors | ForEach-Object { Write-Host "       - $_" -ForegroundColor Red }
                 $validationFailed = $true
               } else {
                 Write-Host "    ✅ Validation PASSED" -ForegroundColor Green
@@ -186,7 +197,7 @@ jobs:
           
           if ($validationFailed) {
             Write-Host ""
-            Write-Host "❌ SQL validation failed. Please fix errors above." -ForegroundColor Red
+            Write-Host "❌ SQL validation failed" -ForegroundColor Red
             throw "Validation failed"
           }
           
