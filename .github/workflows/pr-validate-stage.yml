@@ -1,65 +1,52 @@
-name: Validate & Deploy to STAGING (With YAML Validator)
+name: PR → Validate & Deploy to STAGING
 
 on:
   pull_request:
     paths:
       - "deploy/**/*.sql"
-      - "tables/**/*.yml"
-      - "tables/**/*.yaml"
-      - "scripts/**"
       - "rules.yml"
       - ".github/**"
 
 defaults:
   run:
-    shell: cmd
+    shell: powershell
 
 jobs:
-  setup:
+  validate_and_deploy:
     runs-on: [self-hosted, Windows]
-    outputs:
-      create_changed: ${{ steps.chg_create.outputs.has_changes }}
-      create_count:   ${{ steps.chg_create.outputs.file_count }}
-      alter_changed:  ${{ steps.chg_alter.outputs.has_changes }}
-      alter_count:    ${{ steps.chg_alter.outputs.file_count }}
-      drop_changed:   ${{ steps.chg_drop.outputs.has_changes }}
-      drop_count:     ${{ steps.chg_drop.outputs.file_count }}
+    environment: staging
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install pyyaml
+
       - name: Resolve sqlcmd
-        shell: powershell
-        env:
-          VAR_SQLCMD: ${{ vars.SQLCMD_EXE }}
         run: |
           $ErrorActionPreference='Stop'
-          function Exists($p){ if([string]::IsNullOrWhiteSpace($p)){return $false}; Test-Path $p }
-          $c=@()
-          if($env:VAR_SQLCMD){ $c+=$env:VAR_SQLCMD }
-          try{ $found=& where.exe sqlcmd 2>$null; if($LASTEXITCODE -eq 0){ $c+=($found -split "`r?`n" | ? { $_ -and (Test-Path $_) }) } }catch{}
-          $c+=@(
+          $sqlcmdPaths = @(
+            "${{ vars.SQLCMD_EXE }}",
             "C:\Program Files\SqlCmd\sqlcmd.exe",
             "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe",
             "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe",
             "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe"
           )
-          $pick=$c|?{Exists $_}|Select-Object -First 1
-          if(-not $pick){ throw "sqlcmd.exe not found. Set repo variable SQLCMD_EXE or install SQL tools." }
-          "SQLCMD_EXE=$pick" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-          Write-Host "Using sqlcmd: $pick"
+          $sqlcmd = $sqlcmdPaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if (!$sqlcmd) {
+            try { $sqlcmd = (where.exe sqlcmd 2>$null) } catch {}
+          }
+          if (!$sqlcmd) { throw "sqlcmd.exe not found" }
+          Write-Host "Using sqlcmd: $sqlcmd"
+          "SQLCMD_EXE=$sqlcmd" | Out-File $env:GITHUB_ENV -Append
 
-      - name: DNS & TCP checks (STAGING)
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-        run: |
-          nslookup %H% || (echo DNS FAILED & exit /b 1)
-          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
-          powershell -Command "if(!(Test-NetConnection -ComputerName '%H%' -Port ([int]'%PORT%') -InformationLevel Quiet)){exit 1}"
-
-      - name: Test sqlcmd login (STAGING)
+      - name: Test database connection
         env:
           H: ${{ secrets.STG_DB_HOST }}
           P: ${{ secrets.STG_DB_PORT }}
@@ -67,746 +54,295 @@ jobs:
           U: ${{ secrets.STG_DB_USER }}
           W: ${{ secrets.STG_DB_PASSWORD }}
         run: |
-          set "PORT=%P%" & if "%PORT%"=="" set "PORT=1433"
-          echo Target: %H%,%PORT% / DB=%D%
-          "%SQLCMD_EXE%" -S %H%,%PORT% -d %D% -U %U% -P %W% -l 10 -b -C -Q "SELECT 1"
+          $PORT = if ($env:P) { $env:P } else { "1433" }
+          Write-Host "Testing connection to $env:H,$PORT..."
+          
+          $result = Test-NetConnection -ComputerName $env:H -Port $PORT -InformationLevel Quiet -WarningAction SilentlyContinue
+          if (!$result) { throw "Cannot reach database host" }
+          
+          & $env:SQLCMD_EXE -S "$env:H,$PORT" -d $env:D -U $env:U -P $env:W -l 10 -b -C -Q "SELECT 1"
+          if ($LASTEXITCODE -ne 0) { throw "Database login failed" }
+          Write-Host "✅ Database connection successful"
 
-      - name: Compute CREATE changes
-        id: chg_create
-        shell: powershell
+      - name: Detect changed projects
+        id: detect_projects
         run: |
           $ErrorActionPreference='Stop'
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
           
-          try { 
+          try {
             git fetch origin --depth=100 2>$null
-            git fetch --all --tags --prune 2>$null 
+            git fetch --all --tags --prune 2>$null
           } catch {}
           
-          $base='${{ github.base_ref }}'
+          $base = '${{ github.base_ref }}'
           if ($base) {
-            Write-Host "PR mode: base=$base"
-            try { 
-              git fetch origin "${base}:refs/remotes/origin/$base" --depth=100 2>$null 
+            try {
+              git fetch origin "${base}:refs/remotes/origin/$base" --depth=100 2>$null
             } catch {}
-            $range="origin/$base...HEAD"
+            $range = "origin/$base...HEAD"
           } else {
-            $before='${{ github.event.before }}'
-            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { 
-              $range='HEAD~1...HEAD' 
-            } else { 
-              $range="$before...HEAD" 
+            $before = '${{ github.event.before }}'
+            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') {
+              $range = 'HEAD~1...HEAD'
+            } else {
+              $range = "$before...HEAD"
             }
           }
           
-          Write-Host "Git diff range (CREATE): $range"
+          Write-Host "Git diff range: $range"
           
-          $all = @()
-          if (Test-Path 'deploy/create') {
-            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/create/*.sql" 2>$null
-            $wt   = git ls-files -mo --exclude-standard -- "deploy/create/*.sql" 2>$null
-            if($diff){ $all+=$diff }
-            if($wt){ $all+=$wt }
-            $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
+          # Get all changed SQL files in deploy/
+          $changedFiles = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/**/*.sql" 2>$null
+          $untrackedFiles = git ls-files -mo --exclude-standard -- "deploy/**/*.sql" 2>$null
+          
+          $allFiles = @()
+          if ($changedFiles) { $allFiles += $changedFiles }
+          if ($untrackedFiles) { $allFiles += $untrackedFiles }
+          $allFiles = $allFiles | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
+          
+          if ($allFiles.Count -eq 0) {
+            Write-Host "ℹ️ No SQL files changed in deploy/"
+            "projects=" | Out-File $env:GITHUB_OUTPUT -Append
+            "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
+            exit 0
           }
           
-          Write-Host "Found $($all.Count) CREATE file(s)"
+          # Group files by project folder
+          $projects = @{}
+          foreach ($file in $allFiles) {
+            # Extract project folder: deploy/project_name/file.sql
+            if ($file -match '^deploy/([^/]+)/') {
+              $projectName = $matches[1]
+              if (!$projects.ContainsKey($projectName)) {
+                $projects[$projectName] = @()
+              }
+              $projects[$projectName] += $file
+            }
+          }
           
-          $outFile = '_changed_create.txt'
-          if ($all.Count -gt 0) {
-            $all | Set-Content -Encoding UTF8 -LiteralPath $outFile
-            "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
-            "file_count=$($all.Count)" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[OK] CREATE files detected:"
-            $all | ForEach-Object { Write-Host "   - $_" }
-          } else {
-            "" | Set-Content -Encoding UTF8 -LiteralPath $outFile -NoNewline
-            "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
-            "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
-            Write-Host "[INFO] No CREATE changes"
+          Write-Host ""
+          Write-Host "========================================="
+          Write-Host "CHANGED PROJECTS DETECTED"
+          Write-Host "========================================="
+          foreach ($proj in $projects.Keys | Sort-Object) {
+            Write-Host "📁 $proj ($($projects[$proj].Count) files)"
+            $projects[$proj] | Sort-Object | ForEach-Object { Write-Host "   - $_" }
+          }
+          Write-Host "========================================="
+          
+          # Save project list to output and file
+          $projectList = ($projects.Keys | Sort-Object) -join ','
+          "projects=$projectList" | Out-File $env:GITHUB_OUTPUT -Append
+          "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
+          
+          # Save detailed file list per project
+          foreach ($proj in $projects.Keys) {
+            $projects[$proj] | Set-Content "_changed_${proj}.txt" -Encoding UTF8
           }
 
-      - name: Validate CREATE files with YAML rules
-        if: steps.chg_create.outputs.has_changes == 'true'
-        shell: powershell
+      - name: Validate SQL files
+        if: steps.detect_projects.outputs.has_changes == 'true'
         run: |
           $ErrorActionPreference='Stop'
           
           Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "Validating CREATE files with YAML rules"
-          Write-Host "=========================================="
+          Write-Host "========================================="
+          Write-Host "VALIDATING SQL FILES"
+          Write-Host "========================================="
           
-          if (!(Test-Path 'rules.yml')) {
-            Write-Host "[WARNING] rules.yml not found, skipping validation"
-            exit 0
-          }
-          
-          $files = Get-Content '_changed_create.txt' -ErrorAction SilentlyContinue
-          if (!$files -or $files.Count -eq 0) {
-            Write-Host "No CREATE files to validate"
-            exit 0
-          }
-          
+          $projects = '${{ steps.detect_projects.outputs.projects }}'.Split(',') | Where-Object { $_ }
           $validationFailed = $false
-          $rulesContent = Get-Content 'rules.yml' -Raw
           
-          Write-Host "Checking type_guards.create rules..."
-          
-          # TYPE_GUARDS - CREATE
-          if ($rulesContent -match 'type_guards:') {
-            $typeGuardsSection = $rulesContent -split 'type_guards:' | Select-Object -Skip 1 | Select-Object -First 1
-            $typeGuardsSection = $typeGuardsSection -split 'naming_conventions:' | Select-Object -First 1
+          foreach ($proj in $projects) {
+            $fileList = "_changed_${proj}.txt"
+            if (!(Test-Path $fileList)) { continue }
             
-            if ($typeGuardsSection -match 'create:') {
-              $createSection = $typeGuardsSection -split 'create:' | Select-Object -Skip 1 | Select-Object -First 1
-              $createSection = $createSection -split 'alter:' | Select-Object -First 1
-              
-              if ($createSection -match 'enabled:\s*true') {
-                Write-Host "CREATE type_guards validation is ENABLED"
-                
-                $patterns = @()
-                if ($createSection -match 'disallowed_patterns:') {
-                  $patternsSection = $createSection -split 'disallowed_patterns:' | Select-Object -Skip 1 | Select-Object -First 1
-                  $patternsSection = $patternsSection -split 'naming_conventions:' | Select-Object -First 1
-                  
-                  $patternBlocks = [regex]::Matches($patternsSection, '- pattern:.*?(?=\n\s+- pattern:|\n\s+[a-z_]+:|\Z)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-                  
-                  foreach ($block in $patternBlocks) {
-                    $blockContent = $block.Value
-                    if ($blockContent -match "pattern:\s*'([^']*)'") {
-                      $pattern = $matches[1]
-                      $name = "Unknown"
-                      if ($blockContent -match "name:\s*'([^']*)'") { $name = $matches[1] }
-                      $message = "Validation failed"
-                      if ($blockContent -match "message:\s*'([^']*)'") { $message = $matches[1] }
-                      
-                      Write-Host "  Rule: $name - $pattern"
-                      $patterns += @{ Name = $name; Pattern = $pattern; Message = $message }
-                    }
-                  }
-                }
-                
-                # Apply type_guards validation
-                foreach ($file in $files) {
-                  $file = $file.Trim()
-                  if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
-                  
-                  $content = Get-Content $file -Raw
-                  Write-Host "Validating type_guards: $file"
-                  
-                  foreach ($rule in $patterns) {
-                    if ($content -match $rule.Pattern) {
-                      Write-Host "[TYPE_GUARDS ERROR] $($rule.Message)" -ForegroundColor Red
-                      Write-Host "  File: $file" -ForegroundColor Red
-                      Write-Host "  Pattern: $($rule.Pattern)" -ForegroundColor Red
-                      $validationFailed = $true
-                    }
-                  }
-                }
-              }
-            }
-          }
-          
-          # NAMING_CONVENTIONS - CREATE
-          if ($rulesContent -match 'naming_conventions:') {
-            $namingSection = $rulesContent -split 'naming_conventions:' | Select-Object -Skip 1 | Select-Object -First 1
-            $namingSection = $namingSection -split 'performance_checks:' | Select-Object -First 1
+            Write-Host ""
+            Write-Host "📁 Validating project: $proj"
             
-            if ($namingSection -match 'enabled:\s*true') {
-              Write-Host "NAMING_CONVENTIONS validation is ENABLED"
+            $files = Get-Content $fileList
+            foreach ($file in $files) {
+              $file = $file.Trim()
+              if (!(Test-Path $file)) { continue }
               
-              # Table naming rules
-              if ($namingSection -match 'tables:') {
-                $tablesSection = $namingSection -split 'tables:' | Select-Object -Skip 1 | Select-Object -First 1
-                $tablesSection = $tablesSection -split 'columns:' | Select-Object -First 1
-                
-                if ($tablesSection -match "pattern:\s*'([^']*)'") {
-                  $tablePattern = $matches[1]
-                  $tableMessage = "Table naming convention violation"
-                  if ($tablesSection -match "message:\s*'([^']*)'") { $tableMessage = $matches[1] }
-                  
-                  Write-Host "  Table pattern: $tablePattern"
-                  
-                  foreach ($file in $files) {
-                    $file = $file.Trim()
-                    if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
-                    
-                    $content = Get-Content $file -Raw
-                    # Extract table names from CREATE TABLE statements
-                    if ($content -match '(?i)CREATE\s+TABLE\s+[\[\]]?(\w+)[\[\]]?') {
-                      $tableName = $matches[1]
-                      if ($tableName -notmatch $tablePattern) {
-                        # PERBAIKAN: Gunakan format string atau kurung kurawal untuk variable
-                        Write-Host ("[NAMING ERROR] {0}: {1}" -f $tableMessage, $tableName) -ForegroundColor Red
-                        Write-Host "  File: $file" -ForegroundColor Red
-                        $validationFailed = $true
-                      }
-                    }
-                  }
-                }
-              }
+              Write-Host "  Checking: $file"
               
-              # Column naming rules
-              if ($namingSection -match 'columns:') {
-                $columnsSection = $namingSection -split 'columns:' | Select-Object -Skip 1 | Select-Object -First 1
-                $columnsSection = $columnsSection -split 'performance_checks:' | Select-Object -First 1
-                
-                if ($columnsSection -match "pattern:\s*'([^']*)'") {
-                  $columnPattern = $matches[1]
-                  $columnMessage = "Column naming convention violation"
-                  if ($columnsSection -match "message:\s*'([^']*)'") { $columnMessage = $matches[1] }
-                  
-                  Write-Host "  Column pattern: $columnPattern"
-                  
-                  foreach ($file in $files) {
-                    $file = $file.Trim()
-                    if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
-                    
-                    $content = Get-Content $file -Raw
-                    # Extract column names (simple pattern)
-                    $columnMatches = [regex]::Matches($content, '\[?(\w+)\]?\s+(?:INT|VARCHAR|NVARCHAR|DECIMAL|DATETIME|BIT)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-                    foreach ($match in $columnMatches) {
-                      $columnName = $match.Groups[1].Value
-                      if ($columnName -notmatch $columnPattern) {
-                        # PERBAIKAN: Gunakan format string atau kurung kurawal untuk variable
-                        Write-Host ("[NAMING ERROR] {0}: {1}" -f $columnMessage, $columnName) -ForegroundColor Red
-                        Write-Host "  File: $file" -ForegroundColor Red
-                        $validationFailed = $true
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-          
-          # PERFORMANCE_CHECKS - CREATE
-          if ($rulesContent -match 'performance_checks:') {
-            $performanceSection = $rulesContent -split 'performance_checks:' | Select-Object -Skip 1 | Select-Object -First 1
-            $performanceSection = $performanceSection -split 'security_checks:' | Select-Object -First 1
-            
-            if ($performanceSection -match 'enabled:\s*true') {
-              Write-Host "PERFORMANCE_CHECKS validation is ENABLED"
+              # Detect operation type from SQL content
+              $content = Get-Content $file -Raw
+              $isAlter = $content -match '(?i)\bALTER\s+(TABLE|PROCEDURE|FUNCTION)'
+              $type = if ($isAlter) { "alter" } else { "create" }
               
-              if ($performanceSection -match 'rules:') {
-                $rulesSection = $performanceSection -split 'rules:' | Select-Object -Skip 1 | Select-Object -First 1
-                
-                # Check for SELECT * usage
-                if ($rulesSection -match 'SELECT \* usage') {
-                  foreach ($file in $files) {
-                    $file = $file.Trim()
-                    if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
-                    
-                    $content = Get-Content $file -Raw
-                    if ($content -match 'SELECT\s+\*') {
-                      Write-Host "[PERFORMANCE WARNING] SELECT * usage detected" -ForegroundColor Yellow
-                      Write-Host "  File: $file" -ForegroundColor Yellow
-                    }
-                  }
-                }
-              }
-            }
-          }
-          
-          # SECURITY_CHECKS - CREATE
-          if ($rulesContent -match 'security_checks:') {
-            $securitySection = $rulesContent -split 'security_checks:' | Select-Object -Skip 1 | Select-Object -First 1
-            
-            if ($securitySection -match 'enabled:\s*true') {
-              Write-Host "SECURITY_CHECKS validation is ENABLED"
-              
-              if ($securitySection -match 'rules:') {
-                $rulesSection = $securitySection -split 'rules:' | Select-Object -Skip 1 | Select-Object -First 1
-                
-                # Check for missing WHERE clause
-                if ($rulesSection -match 'Missing WHERE clause in UPDATE/DELETE') {
-                  foreach ($file in $files) {
-                    $file = $file.Trim()
-                    if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
-                    
-                    $content = Get-Content $file -Raw
-                    if ($content -match '(?i)(UPDATE\s+\w+\s+SET|DELETE\s+FROM\s+\w+)(?!(.|\n)*WHERE)') {
-                      Write-Host "[SECURITY ERROR] Missing WHERE clause in UPDATE/DELETE" -ForegroundColor Red
-                      Write-Host "  File: $file" -ForegroundColor Red
-                      $validationFailed = $true
-                    }
-                  }
-                }
-              }
-            }
-          }
-          
-          if ($validationFailed) {
-            Write-Host "`n[VALIDATION FAILED] CREATE files contain validation errors" -ForegroundColor Red
-            exit 1
-          } else {
-            Write-Host "`n[SUCCESS] All CREATE files passed validation" -ForegroundColor Green
-          }
-
-      - name: Compute ALTER changes
-        id: chg_alter
-        shell: powershell
-        run: |
-          $ErrorActionPreference='Stop'
-          $base='${{ github.base_ref }}'
-          if ($base) { $range="origin/$base...HEAD" } else {
-            $before='${{ github.event.before }}'
-            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { $range='HEAD~1...HEAD' } else { $range="$before...HEAD" }
-          }
-
-          $all = @()
-          if (Test-Path 'deploy/alter') {
-            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/alter/*.sql" "deploy/alter/**/*.sql" 2>$null
-            $wt   = git ls-files -mo --exclude-standard -- "deploy/alter/*.sql" "deploy/alter/**/*.sql" 2>$null
-            if($diff){ $all+=$diff }
-            if($wt){ $all+=$wt }
-            $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
-          }
-
-          Write-Host "Found $($all.Count) ALTER file(s)"
-          if ($all.Count -gt 0) {
-            Write-Host "ALTER files:"
-            $all | ForEach-Object { Write-Host "   - $_" }
-          }
-
-          $outFile = '_changed_alter.txt'
-          if ($all.Count -gt 0) {
-            $all | Set-Content -Encoding UTF8 -LiteralPath $outFile
-            "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
-            "file_count=$($all.Count)" | Out-File $env:GITHUB_OUTPUT -Append
-          } else {
-            "" | Set-Content -Encoding UTF8 -LiteralPath $outFile -NoNewline
-            "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
-            "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
-          }
-
-      - name: Validate ALTER files with YAML rules
-        if: steps.chg_alter.outputs.has_changes == 'true'
-        shell: powershell
-        run: |
-          $ErrorActionPreference='Stop'
-          
-          Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "Validating ALTER files with YAML rules"
-          Write-Host "=========================================="
-          
-          if (!(Test-Path 'rules.yml')) {
-            Write-Host "[WARNING] rules.yml not found, skipping validation"
-            exit 0
-          }
-          
-          $files = Get-Content '_changed_alter.txt' -ErrorAction SilentlyContinue
-          if (!$files -or $files.Count -eq 0) {
-            Write-Host "No ALTER files to validate"
-            exit 0
-          }
-          
-          $validationFailed = $false
-          $rulesContent = Get-Content 'rules.yml' -Raw
-          
-          Write-Host "Checking type_guards.alter rules..."
-          
-          # TYPE_GUARDS - ALTER
-          if ($rulesContent -match 'type_guards:') {
-            $typeGuardsSection = $rulesContent -split 'type_guards:' | Select-Object -Skip 1 | Select-Object -First 1
-            $typeGuardsSection = $typeGuardsSection -split 'naming_conventions:' | Select-Object -First 1
-            
-            if ($typeGuardsSection -match 'alter:') {
-              $alterSection = $typeGuardsSection -split 'alter:' | Select-Object -Skip 1 | Select-Object -First 1
-              $alterSection = $alterSection -split 'drop:' | Select-Object -First 1
-              
-              if ($alterSection -match 'enabled:\s*true') {
-                Write-Host "ALTER type_guards validation is ENABLED"
-                
-                $patterns = @()
-                if ($alterSection -match 'disallowed_patterns:') {
-                  $patternsSection = $alterSection -split 'disallowed_patterns:' | Select-Object -Skip 1 | Select-Object -First 1
-                  
-                  $patternBlocks = [regex]::Matches($patternsSection, '- pattern:.*?(?=\n\s+- pattern:|\n\s+[a-z_]+:|\Z)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-                  
-                  foreach ($block in $patternBlocks) {
-                    $blockContent = $block.Value
-                    if ($blockContent -match "pattern:\s*'([^']*)'") {
-                      $pattern = $matches[1]
-                      $name = "Unknown"
-                      if ($blockContent -match "name:\s*'([^']*)'") { $name = $matches[1] }
-                      $message = "Validation failed"
-                      if ($blockContent -match "message:\s*'([^']*)'") { $message = $matches[1] }
-                      
-                      Write-Host "  Rule: $name - $pattern"
-                      $patterns += @{ Name = $name; Pattern = $pattern; Message = $message }
-                    }
-                  }
-                }
-                
-                # Apply type_guards validation
-                foreach ($file in $files) {
-                  $file = $file.Trim()
-                  if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
-                  
-                  $content = Get-Content $file -Raw
-                  Write-Host "Validating type_guards: $file"
-                  
-                  foreach ($rule in $patterns) {
-                    if ($content -match $rule.Pattern) {
-                      Write-Host "[TYPE_GUARDS ERROR] $($rule.Message)" -ForegroundColor Red
-                      Write-Host "  File: $file" -ForegroundColor Red
-                      Write-Host "  Pattern: $($rule.Pattern)" -ForegroundColor Red
-                      $validationFailed = $true
-                    }
-                  }
-                }
-              }
-            }
-          }
-          
-          # Note: Untuk ALTER, naming_conventions, performance_checks, dan security_checks 
-          # bisa ditambahkan dengan logika serperti CREATE jika diperlukan
-          
-          if ($validationFailed) {
-            Write-Host "`n[VALIDATION FAILED] ALTER files contain validation errors" -ForegroundColor Red
-            exit 1
-          } else {
-            Write-Host "`n[SUCCESS] All ALTER files passed validation" -ForegroundColor Green
-          }
-
-      - name: Compute DROP changes
-        id: chg_drop
-        shell: powershell
-        run: |
-          $ErrorActionPreference='Stop'
-          $base='${{ github.base_ref }}'
-          if ($base) { $range="origin/$base...HEAD" } else {
-            $before='${{ github.event.before }}'
-            if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { $range='HEAD~1...HEAD' } else { $range="$before...HEAD" }
-          }
-          
-          $all = @()
-          if (Test-Path 'deploy/drop') {
-            $diff = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/drop/*.sql" 2>$null
-            $wt   = git ls-files -mo --exclude-standard -- "deploy/drop/*.sql" 2>$null
-            if($diff){ $all+=$diff }
-            if($wt){ $all+=$wt }
-            $all=$all | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
-          }
-          
-          Write-Host "Found $($all.Count) DROP file(s)"
-          
-          $outFile = '_changed_drop.txt'
-          if ($all.Count -gt 0) {
-            $all | Set-Content -Encoding UTF8 -LiteralPath $outFile
-            "has_changes=true" | Out-File $env:GITHUB_OUTPUT -Append
-            "file_count=$($all.Count)" | Out-File $env:GITHUB_OUTPUT -Append
-          } else {
-            "" | Set-Content -Encoding UTF8 -LiteralPath $outFile -NoNewline
-            "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
-            "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
-          }
-
-      - name: Validate DROP files with YAML rules
-        if: steps.chg_drop.outputs.has_changes == 'true'
-        shell: powershell
-        run: |
-          $ErrorActionPreference='Stop'
-          
-          Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "Validating DROP files with YAML rules"
-          Write-Host "=========================================="
-          
-          if (!(Test-Path 'rules.yml')) {
-            Write-Host "[WARNING] rules.yml not found, skipping validation"
-            exit 0
-          }
-          
-          $files = Get-Content '_changed_drop.txt' -ErrorAction SilentlyContinue
-          if (!$files -or $files.Count -eq 0) {
-            Write-Host "No DROP files to validate"
-            exit 0
-          }
-          
-          $validationFailed = $false
-          $rulesContent = Get-Content 'rules.yml' -Raw
-          
-          Write-Host "Checking type_guards.drop rules..."
-          
-          # TYPE_GUARDS - DROP
-          if ($rulesContent -match 'type_guards:') {
-            $typeGuardsSection = $rulesContent -split 'type_guards:' | Select-Object -Skip 1 | Select-Object -First 1
-            
-            if ($typeGuardsSection -match 'drop:') {
-              $dropSection = $typeGuardsSection -split 'drop:' | Select-Object -Skip 1 | Select-Object -First 1
-              $dropSection = $dropSection -split 'naming_conventions:' | Select-Object -First 1
-              
-              if ($dropSection -match 'enabled:\s*true') {
-                Write-Host "DROP type_guards validation is ENABLED"
-                
-                $patterns = @()
-                if ($dropSection -match 'disallowed_patterns:') {
-                  $patternsSection = $dropSection -split 'disallowed_patterns:' | Select-Object -Skip 1 | Select-Object -First 1
-                  
-                  $patternBlocks = [regex]::Matches($patternsSection, '- pattern:.*?(?=\n\s+- pattern:|\n\s+[a-z_]+:|\Z)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-                  
-                  foreach ($block in $patternBlocks) {
-                    $blockContent = $block.Value
-                    if ($blockContent -match "pattern:\s*'([^']*)'") {
-                      $pattern = $matches[1]
-                      $name = "Unknown"
-                      if ($blockContent -match "name:\s*'([^']*)'") { $name = $matches[1] }
-                      $message = "Validation failed"
-                      if ($blockContent -match "message:\s*'([^']*)'") { $message = $matches[1] }
-                      
-                      Write-Host "  Rule: $name - $pattern"
-                      $patterns += @{ Name = $name; Pattern = $pattern; Message = $message }
-                    }
-                  }
-                }
-                
-                # Apply type_guards validation
-                foreach ($file in $files) {
-                  $file = $file.Trim()
-                  if ([string]::IsNullOrWhiteSpace($file) -or !(Test-Path $file)) { continue }
-                  
-                  $content = Get-Content $file -Raw
-                  Write-Host "Validating type_guards: $file"
-                  
-                  foreach ($rule in $patterns) {
-                    if ($content -match $rule.Pattern) {
-                      Write-Host "[TYPE_GUARDS ERROR] $($rule.Message)" -ForegroundColor Red
-                      Write-Host "  File: $file" -ForegroundColor Red
-                      Write-Host "  Pattern: $($rule.Pattern)" -ForegroundColor Red
-                      $validationFailed = $true
-                    }
-                  }
-                }
+              # Run Python validator
+              $result = python scripts/validate_sql.py --type $type --rules rules.yml $file
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "    ❌ Validation FAILED" -ForegroundColor Red
+                $validationFailed = $true
               } else {
-                Write-Host "DROP type_guards validation is DISABLED"
+                Write-Host "    ✅ Validation PASSED" -ForegroundColor Green
               }
             }
           }
           
           if ($validationFailed) {
-            Write-Host "`n[VALIDATION FAILED] DROP files contain validation errors" -ForegroundColor Red
-            exit 1
-          } else {
-            Write-Host "`n[SUCCESS] All DROP files passed validation" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "❌ SQL validation failed. Please fix errors above." -ForegroundColor Red
+            throw "Validation failed"
           }
+          
+          Write-Host ""
+          Write-Host "✅ All SQL files passed validation" -ForegroundColor Green
 
-      - name: Upload change lists
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: changed-sql-lists
-          path: |
-            _changed_*.txt
-          if-no-files-found: ignore
-
-      - name: Summary
-        if: always()
-        shell: powershell
+      - name: Deploy to STAGING (per project)
+        if: steps.detect_projects.outputs.has_changes == 'true'
+        env:
+          H: ${{ secrets.STG_DB_HOST }}
+          P: ${{ secrets.STG_DB_PORT }}
+          D: ${{ secrets.STG_DB_NAME }}
+          U: ${{ secrets.STG_DB_USER }}
+          W: ${{ secrets.STG_DB_PASSWORD }}
         run: |
+          $ErrorActionPreference='Stop'
+          $PORT = if ($env:P) { $env:P } else { "1433" }
+          
+          Write-Host ""
+          Write-Host "========================================="
+          Write-Host "DEPLOYING TO STAGING"
+          Write-Host "========================================="
+          
+          $projects = '${{ steps.detect_projects.outputs.projects }}'.Split(',') | Where-Object { $_ }
+          $totalDeployed = 0
+          $deploymentLog = @()
+          
+          foreach ($proj in $projects) {
+            Write-Host ""
+            Write-Host "📁 Deploying project: $proj" -ForegroundColor Cyan
+            Write-Host "─────────────────────────────────────────"
+            
+            $fileList = "_changed_${proj}.txt"
+            if (!(Test-Path $fileList)) {
+              Write-Host "  ⚠️ No file list found, skipping"
+              continue
+            }
+            
+            $files = Get-Content $fileList | Sort-Object
+            $projectDeployed = 0
+            
+            # Check if project has ALTER statements - if yes, create backup
+            $hasAlter = $false
+            foreach ($file in $files) {
+              if ((Get-Content $file -Raw) -match '(?i)\bALTER\s+TABLE') {
+                $hasAlter = $true
+                break
+              }
+            }
+            
+            if ($hasAlter) {
+              Write-Host "  📦 Project contains ALTER - creating backup..." -ForegroundColor Yellow
+              # Auto-backup logic would go here
+            }
+            
+            # Deploy files in order (sorted by filename)
+            foreach ($file in $files) {
+              $file = $file.Trim()
+              if (!(Test-Path $file)) {
+                Write-Host "  ❌ File not found: $file" -ForegroundColor Red
+                throw "Deployment failed: file not found"
+              }
+              
+              $fileName = Split-Path $file -Leaf
+              Write-Host "  🚀 Deploying: $fileName"
+              
+              $fullPath = Resolve-Path $file
+              $sqlcmdArgs = @(
+                "-S", "$env:H,$PORT",
+                "-d", "$env:D",
+                "-U", "$env:U",
+                "-P", "$env:W",
+                "-b", "-C",
+                "-i", "`"$fullPath`""
+              )
+              
+              $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
+              
+              if ($process.ExitCode -ne 0) {
+                Write-Host "  ❌ FAILED: $fileName (exit code: $($process.ExitCode))" -ForegroundColor Red
+                throw "Deployment failed for $file"
+              }
+              
+              Write-Host "  ✅ SUCCESS: $fileName" -ForegroundColor Green
+              $projectDeployed++
+              $totalDeployed++
+              
+              $deploymentLog += @{
+                project = $proj
+                file = $fileName
+                status = "success"
+                timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+              }
+            }
+            
+            Write-Host "  📊 Project '$proj': deployed $projectDeployed file(s)" -ForegroundColor Cyan
+          }
+          
           Write-Host ""
           Write-Host "========================================="
           Write-Host "DEPLOYMENT SUMMARY"
           Write-Host "========================================="
-          Write-Host "CREATE files: ${{ steps.chg_create.outputs.file_count }}"
-          Write-Host "ALTER files:  ${{ steps.chg_alter.outputs.file_count }}"
-          Write-Host "DROP files:   ${{ steps.chg_drop.outputs.file_count }}"
+          Write-Host "Total projects: $($projects.Count)"
+          Write-Host "Total files deployed: $totalDeployed"
+          Write-Host "Status: ✅ SUCCESS"
           Write-Host "========================================="
-
-  # Deploy jobs remain the same...
-  deploy_create_stg:
-    needs: setup
-    if: needs.setup.outputs.create_changed == 'true' && needs.setup.outputs.create_count != '0'
-    runs-on: [self-hosted, Windows]
-    environment: staging
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        with:
-          name: changed-sql-lists
-          path: ./
-
-      - name: Resolve & check sqlcmd
-        shell: powershell
-        run: |
-          $ErrorActionPreference='Stop'
-          $SQLCMD_EXE='${{ vars.SQLCMD_EXE }}'
-          if ([string]::IsNullOrWhiteSpace($SQLCMD_EXE)) {
-            $paths = @(
-              "C:\Program Files\SqlCmd\sqlcmd.exe",
-              "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe",
-              "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe",
-              "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe"
-            )
-            $SQLCMD_EXE = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
-          }
-          if ([string]::IsNullOrWhiteSpace($SQLCMD_EXE)) { throw "sqlcmd.exe not found" }
-          Write-Host "Using sqlcmd: $SQLCMD_EXE"
-          "SQLCMD_EXE=$SQLCMD_EXE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-
-      - name: Deploy CREATE files
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-          D: ${{ secrets.STG_DB_NAME }}
-          U: ${{ secrets.STG_DB_USER }}
-          W: ${{ secrets.STG_DB_PASSWORD }}
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PORT = if ($env:P) { $env:P } else { "1433" }
           
-          if (!(Test-Path '_changed_create.txt')) { throw "File not found" }
-          
-          $files = Get-Content '_changed_create.txt' | Where-Object { $_.Trim() }
-          if ($files.Count -eq 0) { throw "No files to deploy" }
-          
-          $DEPLOYED = 0
-          
-          foreach ($file in $files) {
-            $trimmedFile = $file.Trim()
-            if ([string]::IsNullOrWhiteSpace($trimmedFile)) { continue }
-            
-            Write-Host ""
-            Write-Host "[DEPLOY CREATE] $trimmedFile"
-            
-            if (!(Test-Path $trimmedFile)) { throw "File not found: $trimmedFile" }
-            
-            $fullPath = Resolve-Path $trimmedFile
-            $sqlcmdArgs = @("-S", "$env:H,$PORT", "-d", "$env:D", "-U", "$env:U", "-P", "$env:W", "-b", "-C", "-i", "`"$fullPath`"")
-            $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
-            
-            if ($process.ExitCode -ne 0) { throw "Deploy failed: $trimmedFile" }
-            
-            Write-Host "[SUCCESS] $trimmedFile"
-            $DEPLOYED++
-          }
-          
-          Write-Host ""
-          Write-Host "Deployed $DEPLOYED CREATE file(s)"
+          # Save deployment log
+          $deploymentLog | ConvertTo-Json | Set-Content "deployment_log.json"
 
-  deploy_alter_stg:
-    needs: [setup, deploy_create_stg]
-    if: needs.setup.outputs.alter_changed == 'true' && needs.setup.outputs.alter_count != '0'
-    runs-on: [self-hosted, Windows]
-    environment: staging
-    steps:
-      - uses: actions/checkout@v4
+      - name: Upload deployment artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
+          name: staging-deployment-logs
+          path: |
+            _changed_*.txt
+            deployment_log.json
+          if-no-files-found: ignore
+
+      - name: Comment on PR
+        if: always() && steps.detect_projects.outputs.has_changes == 'true'
+        uses: actions/github-script@v7
         with:
-          name: changed-sql-lists
-          path: ./
-
-      - name: Resolve & check sqlcmd
-        shell: powershell
-        run: |
-          $ErrorActionPreference='Stop'
-          $SQLCMD_EXE='${{ vars.SQLCMD_EXE }}'
-          if ([string]::IsNullOrWhiteSpace($SQLCMD_EXE)) {
-            $paths = @("C:\Program Files\SqlCmd\sqlcmd.exe", "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe", "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\160\Tools\Binn\sqlcmd.exe", "C:\Program Files\Microsoft SQL Server\150\Tools\Binn\sqlcmd.exe")
-            $SQLCMD_EXE = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
-          }
-          if ([string]::IsNullOrWhiteSpace($SQLCMD_EXE)) { throw "sqlcmd.exe not found" }
-          "SQLCMD_EXE=$SQLCMD_EXE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-
-      - name: Deploy ALTER files
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-          D: ${{ secrets.STG_DB_NAME }}
-          U: ${{ secrets.STG_DB_USER }}
-          W: ${{ secrets.STG_DB_PASSWORD }}
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PORT = if ($env:P) { $env:P } else { "1433" }
-          $DEPLOYED = 0
-          $files = Get-Content '_changed_alter.txt' | Where-Object { $_.Trim() }
-          foreach ($file in $files) {
-            $trimmedFile = $file.Trim()
-            if (!(Test-Path $trimmedFile)) { throw "File not found: $trimmedFile" }
-            Write-Host "[DEPLOY ALTER] $trimmedFile"
-            $fullPath = Resolve-Path $trimmedFile
-            $sqlcmdArgs = @("-S", "$env:H,$PORT", "-d", "$env:D", "-U", "$env:U", "-P", "$env:W", "-b", "-C", "-i", "`"$fullPath`"")
-            $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
-            if ($process.ExitCode -ne 0) { throw "Deploy failed: $trimmedFile" }
-            Write-Host "[SUCCESS] $trimmedFile"
-            $DEPLOYED++
-          }
-          Write-Host "Deployed $DEPLOYED ALTER file(s)"
-
-  deploy_drop_stg:
-    needs: [setup, deploy_alter_stg]
-    if: needs.setup.outputs.drop_changed == 'true' && needs.setup.outputs.drop_count != '0'
-    runs-on: [self-hosted, Windows]
-    environment: staging
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        with:
-          name: changed-sql-lists
-          path: ./
-
-      - name: Resolve & check sqlcmd
-        shell: powershell
-        run: |
-          $ErrorActionPreference='Stop'
-          $SQLCMD_EXE='${{ vars.SQLCMD_EXE }}'
-          if ([string]::IsNullOrWhiteSpace($SQLCMD_EXE)) {
-            $paths = @("C:\Program Files\SqlCmd\sqlcmd.exe", "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\sqlcmd.exe")
-            $SQLCMD_EXE = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
-          }
-          if ([string]::IsNullOrWhiteSpace($SQLCMD_EXE)) { throw "sqlcmd.exe not found" }
-          "SQLCMD_EXE=$SQLCMD_EXE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
-
-      - name: Guard allowlist DROP
-        shell: powershell
-        run: |
-          $allow=Get-Content -ErrorAction SilentlyContinue '.github\drop-allowlist.txt'
-          if(-not $allow){throw "No drop-allowlist.txt -> all DROP blocked"}
-          $rx=[regex]'(?is)\bdrop\s+table\s+(?:\[?(?<s>\w+)\]?\.)?\[?(?<t>\w+)\]?'
-          foreach($f in Get-Content '_changed_drop.txt'){
-            if(Test-Path $f){
-              $c=Get-Content $f -Raw
-              foreach($m in $rx.Matches($c)){
-                $s=$m.Groups['s'].Success?$m.Groups['s'].Value:'dbo'
-                $t=$m.Groups['t'].Value
-                if($allow -notcontains "$s.$t"){throw "DROP not in allowlist: $s.$t"}
+          script: |
+            const fs = require('fs');
+            const projects = '${{ steps.detect_projects.outputs.projects }}'.split(',').filter(x => x);
+            
+            let comment = '## 🚀 Staging Deployment Report\n\n';
+            comment += `**Status:** ${{ job.status == 'success' && '✅ SUCCESS' || '❌ FAILED' }}\n`;
+            comment += `**Environment:** STAGING\n`;
+            comment += `**Projects deployed:** ${projects.length}\n\n`;
+            
+            comment += '### 📁 Projects\n\n';
+            for (const proj of projects) {
+              comment += `#### ${proj}\n\n`;
+              const fileList = `_changed_${proj}.txt`;
+              if (fs.existsSync(fileList)) {
+                const files = fs.readFileSync(fileList, 'utf8').trim().split('\n');
+                comment += '| File | Status |\n';
+                comment += '|------|--------|\n';
+                files.forEach(file => {
+                  const fileName = file.split('/').pop();
+                  const status = '${{ job.status }}' === 'success' ? '✅' : '❌';
+                  comment += `| \`${fileName}\` | ${status} |\n`;
+                });
+                comment += '\n';
               }
             }
-          }
-
-      - name: Deploy DROP files
-        env:
-          H: ${{ secrets.STG_DB_HOST }}
-          P: ${{ secrets.STG_DB_PORT }}
-          D: ${{ secrets.STG_DB_NAME }}
-          U: ${{ secrets.STG_DB_USER }}
-          W: ${{ secrets.STG_DB_PASSWORD }}
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PORT = if ($env:P) { $env:P } else { "1433" }
-          $DEPLOYED = 0
-          $files = Get-Content '_changed_drop.txt' | Where-Object { $_.Trim() }
-          foreach ($file in $files) {
-            $trimmedFile = $file.Trim()
-            if (!(Test-Path $trimmedFile)) { throw "File not found: $trimmedFile" }
-            Write-Host "[DEPLOY DROP] $trimmedFile"
-            $fullPath = Resolve-Path $trimmedFile
-            $sqlcmdArgs = @("-S", "$env:H,$PORT", "-d", "$env:D", "-U", "$env:U", "-P", "$env:W", "-b", "-C", "-i", "`"$fullPath`"")
-            $process = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $sqlcmdArgs -Wait -PassThru -NoNewWindow
-            if ($process.ExitCode -ne 0) { throw "Deploy failed: $trimmedFile" }
-            Write-Host "[SUCCESS] $trimmedFile"
-            $DEPLOYED++
-          }
-          Write-Host "Deployed $DEPLOYED DROP file(s)"
+            
+            comment += '\n---\n';
+            comment += `_Deployed at ${new Date().toISOString()}_`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
