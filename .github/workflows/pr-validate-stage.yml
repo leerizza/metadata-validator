@@ -64,10 +64,7 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE" 2>$null
-          try {
-            git fetch origin --depth=100 2>$null
-            git fetch --all --tags --prune 2>$null
-          } catch {}
+          try { git fetch origin --depth=100 2>$null; git fetch --all --tags --prune 2>$null } catch {}
 
           $base = '${{ github.base_ref }}'
           if ($base) {
@@ -77,7 +74,7 @@ jobs:
             $before = '${{ github.event.before }}'
             if ([string]::IsNullOrWhiteSpace($before) -or $before -match '^0+$') { $range = 'HEAD~1...HEAD' } else { $range = "$before...HEAD" }
           }
-          Write-Host "Git diff range: $range"
+          Write-Host ('Git diff range: ' + $range)
 
           $changedFiles   = git -c core.quotepath=false diff --name-only --diff-filter=AMR $range -- "deploy/**/*.sql" 2>$null
           $untrackedFiles = git ls-files -mo --exclude-standard -- "deploy/**/*.sql" 2>$null
@@ -88,9 +85,9 @@ jobs:
           $allFiles = $allFiles | Where-Object { $_ -and (Test-Path $_) } | Sort-Object -Unique
 
           if ($allFiles.Count -eq 0) {
-            Write-Host "ℹ️ No SQL files changed in deploy/"
-            Add-Content -Path $env:GITHUB_OUTPUT -Value "projects="
-            Add-Content -Path $env:GITHUB_OUTPUT -Value "has_changes=false"
+            Write-Host 'No SQL files changed in deploy/.'
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'projects='
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'has_changes=false'
             exit 0
           }
 
@@ -98,26 +95,27 @@ jobs:
           foreach ($file in $allFiles) {
             if ($file -match '^deploy/([^/]+)/') {
               $proj = $Matches[1]
-              if (!$projects.ContainsKey($proj)) { $projects[$proj] = @() }
+              if (-not $projects.ContainsKey($proj)) { $projects[$proj] = @() }
               $projects[$proj] += $file
             }
           }
 
-          Write-Host "`n========================================="
-          Write-Host "CHANGED PROJECTS DETECTED"
-          Write-Host "========================================="
+          Write-Host ''
+          Write-Host '========================================='
+          Write-Host 'CHANGED PROJECTS DETECTED'
+          Write-Host '========================================='
           foreach ($p in $projects.Keys | Sort-Object) {
-            Write-Host "📁 $p ($($projects[$p].Count) files)"
-            $projects[$p] | Sort-Object | ForEach-Object { Write-Host "   - $_" }
+            Write-Host ('- ' + $p + ' (' + ($projects[$p].Count) + ' files)')
+            $projects[$p] | Sort-Object | ForEach-Object { Write-Host ('   - ' + $_) }
           }
-          Write-Host "========================================="
+          Write-Host '========================================='
 
           $projectList = ($projects.Keys | Sort-Object) -join ','
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "projects=$projectList"
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "has_changes=true"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value ('projects=' + $projectList)
+          Add-Content -Path $env:GITHUB_OUTPUT -Value 'has_changes=true'
 
           foreach ($p in $projects.Keys) {
-            $projects[$p] | Set-Content "_changed_${p}.txt" -Encoding UTF8
+            $projects[$p] | Set-Content ('_changed_' + $p + '.txt') -Encoding UTF8
           }
 
       - name: Load validation rules (pure PowerShell, no Node/npm)
@@ -287,23 +285,24 @@ jobs:
         if: steps.detect_projects.outputs.has_changes == 'true'
         run: |
           $ErrorActionPreference='Stop'
-          Write-Host "`n========================================="
-          Write-Host "VALIDATING SQL FILES"
-          Write-Host "========================================="
+          Write-Host ''
+          Write-Host '========================================='
+          Write-Host 'VALIDATING SQL FILES'
+          Write-Host '========================================='
 
-          if (!(Test-Path "_validation_rules.json")) {
-            Write-Host "⚠️ Rules not loaded; basic validation only"
+          if (!(Test-Path '_validation_rules.json')) {
+            Write-Host 'Rules not loaded; basic validation only'
             $rules = $null
           } else {
-            $rules = Get-Content "_validation_rules.json" | ConvertFrom-Json
+            $rules = Get-Content '_validation_rules.json' | ConvertFrom-Json
           }
 
-          Add-Type -AssemblyName "System.Core" | Out-Null
+          Add-Type -AssemblyName 'System.Core' | Out-Null
           $ROpts = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor `
                    [System.Text.RegularExpressions.RegexOptions]::Singleline -bor `
                    [System.Text.RegularExpressions.RegexOptions]::Multiline
           function Test-Pat([string]$s,[string]$p){ if([string]::IsNullOrEmpty($p)){ $false } else { [regex]::IsMatch($s,$p,$ROpts) } }
-          function Last-Line([string]$s){ ($s -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" } | Select-Object -Last 1) }
+          function Last-Line([string]$s){ ($s -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | Select-Object -Last 1) }
 
           $projects = '${{ steps.detect_projects.outputs.projects }}'.Split(',') | Where-Object { $_ }
           $validationFailed = $false
@@ -311,15 +310,16 @@ jobs:
           $totalWarnings = 0
 
           foreach ($proj in $projects) {
-            $fileList = "_changed_${proj}.txt"
+            $fileList = '_changed_' + $proj + '.txt'
             if (!(Test-Path $fileList)) { continue }
-            Write-Host "`n📁 Validating project: $proj"
+            Write-Host ''
+            Write-Host ('Validating project: ' + $proj)
             $files = Get-Content $fileList
             foreach ($file in $files) {
               $file = $file.Trim()
               if (!(Test-Path $file)) { continue }
               $content = Get-Content $file -Raw
-              Write-Host "  Checking: $file"
+              Write-Host ('  Checking: ' + $file)
 
               $errors = @()
               $warnings = @()
@@ -328,29 +328,27 @@ jobs:
               $isAlter  = Test-Pat $content '\bALTER\s+(TABLE|PROCEDURE|FUNCTION|VIEW)\b'
 
               if ($rules) {
-                # Type guards
                 if ($rules.type_guards.create.enabled -and $isCreate) {
                   foreach ($r in $rules.type_guards.create.rules) {
                     if ($null -ne $r.pattern -and Test-Pat $content $r.pattern) {
-                      if ($r.severity -eq 'error') { $errors += "$($r.name): $($r.message)" } else { $warnings += "$($r.name): $($r.message)" }
+                      if ($r.severity -eq 'error') { $errors += ($r.name + ': ' + $r.message) } else { $warnings += ($r.name + ': ' + $r.message) }
                     }
                   }
                 }
                 if ($rules.type_guards.alter.enabled -and $isAlter) {
                   foreach ($r in $rules.type_guards.alter.rules) {
                     if ($null -ne $r.pattern -and Test-Pat $content $r.pattern) {
-                      if ($r.severity -eq 'error') { $errors += "$($r.name): $($r.message)" } else { $warnings += "$($r.name): $($r.message)" }
+                      if ($r.severity -eq 'error') { $errors += ($r.name + ': ' + $r.message) } else { $warnings += ($r.name + ': ' + $r.message) }
                     }
                   }
                 }
 
-                # Naming conventions
                 if ($rules.naming_conventions.enabled) {
                   if ($isCreate -and $rules.naming_conventions.tables.pattern) {
                     if ($content -match '(?i)CREATE\s+TABLE\s+(?:\[?([a-zA-Z0-9_]+)\]?\.)?\[?([a-zA-Z0-9_]+)\]?') {
                       $tableName = $Matches[2]
                       if (-not (Test-Pat $tableName $rules.naming_conventions.tables.pattern)) {
-                        $warnings += "Table naming: $($rules.naming_conventions.tables.message) (found: $tableName)"
+                        $warnings += ('Table naming: ' + $rules.naming_conventions.tables.message + ' (found: ' + $tableName + ')')
                       }
                     }
                   }
@@ -359,21 +357,20 @@ jobs:
                     foreach ($m in $colMatches) {
                       $c = $m.Groups[1].Value
                       if (-not (Test-Pat $c $rules.naming_conventions.columns.pattern)) {
-                        $warnings += "Column naming: $($rules.naming_conventions.columns.message) (found: $c)"
+                        $warnings += ('Column naming: ' + $rules.naming_conventions.columns.message + ' (found: ' + $c + ')')
                       }
                     }
                   }
                 }
 
-                # Category runners
                 function Apply-Rules($enabled,$list,[string]$contentRef){
                   if(-not $enabled){ return ,(@(),@()) }
                   $errs=@(); $warns=@()
                   foreach($r in $list){
-                    $pat = "" + $r.pattern
+                    $pat = '' + $r.pattern
                     if([string]::IsNullOrEmpty($pat)){ continue }
                     if(Test-Pat $contentRef $pat){
-                      if($r.severity -eq 'error'){ $errs += "$($r.name): $($r.message)" } else { $warns += "$($r.name): $($r.message)" }
+                      if($r.severity -eq 'error'){ $errs += ($r.name + ': ' + $r.message) } else { $warns += ($r.name + ': ' + $r.message) }
                     }
                   }
                   return ,($errs,$warns)
@@ -390,7 +387,6 @@ jobs:
                 $res = Apply-Rules $rules.custom_rules.enabled $rules.custom_rules.rules $content
                 $errors += $res[0]; $warnings += $res[1]
 
-                # Deployment safety (special handling for Missing GO terminator)
                 if ($rules.deployment_safety.enabled) {
                   foreach ($r in $rules.deployment_safety.rules) {
                     if ($r.name -eq 'Missing GO terminator') {
@@ -398,41 +394,40 @@ jobs:
                       if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) {
                         if ($r.severity -eq 'error') { $errors += $r.message } else { $warnings += $r.message }
                       }
-                      continue
-                    }
-                    if ($null -ne $r.pattern -and Test-Pat $content "$($r.pattern)") {
-                      if ($r.severity -eq 'error') { $errors += "$($r.name): $($r.message)" } else { $warnings += "$($r.name): $($r.message)" }
+                    } elseif ($null -ne $r.pattern -and Test-Pat $content ('' + $r.pattern)) {
+                      if ($r.severity -eq 'error') { $errors += ($r.name + ': ' + $r.message) } else { $warnings += ($r.name + ': ' + $r.message) }
                     }
                   }
                 }
               } else {
-                # Fallback minimal checks
-                if (Test-Pat $content '\bDROP\s+DATABASE\b') { $errors += "DROP DATABASE detected (CRITICAL - not allowed)" }
-                if (Test-Pat $content '\bTRUNCATE\s+TABLE\b') { $errors += "TRUNCATE TABLE detected (data loss risk)" }
-                if (Test-Pat $content '\bDROP\s+TABLE\b')     { $warnings += "DROP TABLE detected" }
+                if (Test-Pat $content '\bDROP\s+DATABASE\b') { $errors += 'DROP DATABASE detected (CRITICAL - not allowed)' }
+                if (Test-Pat $content '\bTRUNCATE\s+TABLE\b') { $errors += 'TRUNCATE TABLE detected (data loss risk)' }
+                if (Test-Pat $content '\bDROP\s+TABLE\b')     { $warnings += 'DROP TABLE detected' }
                 $last = Last-Line $content
-                if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) { $errors += "SQL file must end with GO statement" }
+                if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) { $errors += 'SQL file must end with GO statement' }
               }
 
-              foreach ($w in $warnings) { Write-Host "    ⚠️  $w" -ForegroundColor Yellow; $totalWarnings++ }
+              foreach ($w in $warnings) { Write-Host ('    WARNING: ' + $w) -ForegroundColor Yellow; $totalWarnings++ }
               if ($errors.Count -gt 0) {
-                Write-Host "    ❌ Validation FAILED" -ForegroundColor Red
-                foreach ($e in $errors) { Write-Host "       - $e" -ForegroundColor Red; $totalErrors++ }
+                Write-Host '    Validation FAILED' -ForegroundColor Red
+                foreach ($e in $errors) { Write-Host ('       - ' + $e) -ForegroundColor Red; $totalErrors++ }
                 $validationFailed = $true
               } else {
-                Write-Host "    ✅ Validation PASSED" -ForegroundColor Green
+                Write-Host '    Validation PASSED' -ForegroundColor Green
               }
             }
           }
 
-          Write-Host "`n========================================="
-          Write-Host "VALIDATION SUMMARY"
-          Write-Host "========================================="
-          Write-Host "Total errors: $totalErrors"
-          Write-Host "Total warnings: $totalWarnings"
-          if ($validationFailed) { Write-Host "Status: ❌ FAILED" -ForegroundColor Red; Write-Host "========================================="; throw "Validation failed" }
-          Write-Host "Status: ✅ PASSED" -ForegroundColor Green
-          Write-Host "========================================="
+          Write-Host ''
+          Write-Host '========================================='
+          Write-Host 'VALIDATION SUMMARY'
+          Write-Host '========================================='
+          Write-Host ('Total errors: ' + $totalErrors)
+          Write-Host ('Total warnings: ' + $totalWarnings)
+          if ($validationFailed) { Write-Host 'Status: FAILED' -ForegroundColor Red; Write-Host '========================================='; throw 'Validation failed' }
+          Write-Host 'Status: PASSED' -ForegroundColor Green
+          Write-Host '========================================='
+
 
       - name: Deploy to STAGING (per project)
         if: steps.detect_projects.outputs.has_changes == 'true'
@@ -444,53 +439,64 @@ jobs:
           W: ${{ secrets.STG_DB_PASSWORD }}
         run: |
           $ErrorActionPreference='Stop'
-          $PORT = if ($env:P) { $env:P } else { "1433" }
+          $PORT = if ($env:P) { $env:P } else { '1433' }
 
-          Write-Host "`n========================================="
-          Write-Host "DEPLOYING TO STAGING"
-          Write-Host "========================================="
+          Write-Host ''
+          Write-Host '========================================='
+          Write-Host 'DEPLOYING TO STAGING'
+          Write-Host '========================================='
 
           $projects = '${{ steps.detect_projects.outputs.projects }}'.Split(',') | Where-Object { $_ }
           $totalDeployed = 0
           $deploymentLog = @()
 
           foreach ($proj in $projects) {
-            Write-Host "`n📁 Deploying project: $proj" -ForegroundColor Cyan
-            Write-Host "─────────────────────────────────────────"
-            $fileList = "_changed_${proj}.txt"
-            if (!(Test-Path $fileList)) { Write-Host "  ⚠️ No file list found, skipping"; continue }
+            Write-Host ''
+            Write-Host ('Deploying project: ' + $proj)
+            Write-Host '-----------------------------------------'
+            $fileList = '_changed_' + $proj + '.txt'
+            if (!(Test-Path $fileList)) { Write-Host '  No file list found, skipping'; continue }
 
             $files = Get-Content $fileList | Sort-Object
             $hasAlter = $false
             foreach ($f in $files) { if ((Get-Content $f -Raw) -match '(?i)\bALTER\s+TABLE\b') { $hasAlter = $true; break } }
-            if ($hasAlter) { Write-Host "  📦 Project contains ALTER - create backup here if needed" -ForegroundColor Yellow }
+            if ($hasAlter) { Write-Host '  Project contains ALTER - create backup here if needed' -ForegroundColor Yellow }
 
             foreach ($file in $files) {
               $file = $file.Trim()
-              if (!(Test-Path $file)) { Write-Host "  ❌ File not found: $file" -ForegroundColor Red; throw "Deployment failed: file not found" }
+              if (!(Test-Path $file)) { Write-Host ('  File not found: ' + $file) -ForegroundColor Red; throw ('Deployment failed: file not found ' + $file) }
               $fileName = Split-Path $file -Leaf
-              Write-Host "  🚀 Deploying: $fileName"
+              Write-Host ('  Deploying: ' + $fileName)
+
               $fullPath = Resolve-Path $file
-              $args = @("-S","$env:H,$PORT","-d","$env:D","-U","$env:U","-P","$env:W","-b","-C","-i","`"$fullPath`"")
-              $p = Start-Process -FilePath $env:SQLCMD_EXE -ArgumentList $args -Wait -PassThru -NoNewWindow
-              if ($p.ExitCode -ne 0) { Write-Host "  ❌ FAILED: $fileName (exit $($p.ExitCode))" -ForegroundColor Red; throw "Deployment failed for $file" }
-              Write-Host "  ✅ SUCCESS: $fileName" -ForegroundColor Green
+              $args = @('-S', ("{0},{1}" -f $env:H, $PORT), '-d', $env:D, '-U', $env:U, '-P', $env:W, '-b', '-C', '-i', $fullPath)
+
+              & $env:SQLCMD_EXE @args
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host ('  FAILED: ' + $fileName + ' (exit ' + $LASTEXITCODE + ')') -ForegroundColor Red
+                throw ('Deployment failed for ' + $fileName)
+              }
+
+              Write-Host ('  SUCCESS: ' + $fileName) -ForegroundColor Green
               $totalDeployed++
               $deploymentLog += @{ project=$proj; file=$fileName; status='success'; timestamp=(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') }
             }
 
-            Write-Host "  📊 Project '$proj': deployed $(($deploymentLog | Where-Object { $_.project -eq $proj }).Count) file(s)" -ForegroundColor Cyan
+            $countProj = (($deploymentLog | Where-Object { $_.project -eq $proj }).Count)
+            Write-Host ('  Project "' + $proj + '": deployed ' + $countProj + ' file(s)')
           }
 
-          Write-Host "`n========================================="
-          Write-Host "DEPLOYMENT SUMMARY"
-          Write-Host "========================================="
-          Write-Host "Total projects: $($projects.Count)"
-          Write-Host "Total files deployed: $totalDeployed"
-          Write-Host "Status: ✅ SUCCESS"
-          Write-Host "========================================="
+          Write-Host ''
+          Write-Host '========================================='
+          Write-Host 'DEPLOYMENT SUMMARY'
+          Write-Host '========================================='
+          Write-Host ('Total projects: ' + $projects.Count)
+          Write-Host ('Total files deployed: ' + $totalDeployed)
+          Write-Host 'Status: SUCCESS'
+          Write-Host '========================================='
 
-          $deploymentLog | ConvertTo-Json | Set-Content "deployment_log.json" -Encoding UTF8
+          $deploymentLog | ConvertTo-Json | Set-Content 'deployment_log.json' -Encoding UTF8
+
 
       - name: Upload deployment artifacts
         if: always()
