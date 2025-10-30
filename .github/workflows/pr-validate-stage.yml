@@ -20,14 +20,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      
-      - name: Install dependencies
-        run: pip install pyyaml
-
       - name: Resolve sqlcmd
         run: |
           $ErrorActionPreference='Stop'
@@ -141,6 +133,141 @@ jobs:
             $projects[$proj] | Set-Content "_changed_${proj}.txt" -Encoding UTF8
           }
 
+      - name: Load validation rules
+        id: load_rules
+        if: steps.detect_projects.outputs.has_changes == 'true'
+        run: |
+          $ErrorActionPreference='Stop'
+          
+          if (!(Test-Path "rules.yml")) {
+            Write-Host "⚠️ rules.yml not found, using default rules"
+            "rules_loaded=false" | Out-File $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+          
+          Write-Host "📋 Loading validation rules from rules.yml..."
+          
+          # Read and parse YAML content
+          $rulesContent = Get-Content "rules.yml" -Raw
+          
+          # Helper function to parse YAML patterns
+          function Parse-PatternBlock {
+            param($yamlBlock, $indent = 6)
+            
+            $patterns = @()
+            $currentPattern = $null
+            
+            $lines = $yamlBlock -split "`n"
+            foreach ($line in $lines) {
+              if ($line -match "^\s{$indent}- pattern:\s*['\`"](.+?)['\`"]") {
+                if ($currentPattern) { $patterns += $currentPattern }
+                $currentPattern = @{
+                  pattern = $matches[1]
+                  name = ""
+                  message = ""
+                  severity = "error"
+                }
+              }
+              elseif ($currentPattern) {
+                if ($line -match "^\s+name:\s*['\`"](.+?)['\`"]") {
+                  $currentPattern.name = $matches[1]
+                }
+                elseif ($line -match "^\s+message:\s*['\`"](.+?)['\`"]") {
+                  $currentPattern.message = $matches[1]
+                }
+                elseif ($line -match "^\s+severity:\s*(\w+)") {
+                  $currentPattern.severity = $matches[1]
+                }
+              }
+            }
+            if ($currentPattern) { $patterns += $currentPattern }
+            return $patterns
+          }
+          
+          # Parse type_guards for CREATE
+          $createRules = @()
+          if ($rulesContent -match '(?ms)type_guards:\s*\n\s*create:\s*\n\s*enabled:\s*true.*?\n\s*disallowed_patterns:\s*\n(.*?)(?=\n\s+alter:|\z)') {
+            $createBlock = $matches[1]
+            $createRules = Parse-PatternBlock $createBlock
+          }
+          
+          # Parse type_guards for ALTER
+          $alterRules = @()
+          if ($rulesContent -match '(?ms)type_guards:\s*\n.*?\n\s*alter:\s*\n\s*enabled:\s*true.*?\n\s*disallowed_patterns:\s*\n(.*?)(?=\n\s+drop:|\z)') {
+            $alterBlock = $matches[1]
+            $alterRules = Parse-PatternBlock $alterBlock
+          }
+          
+          # Parse naming_conventions
+          $namingEnabled = $false
+          if ($rulesContent -match '(?m)^naming_conventions:\s*\n\s*enabled:\s*true') {
+            $namingEnabled = $true
+          }
+          
+          $tableNamePattern = ""
+          $tableNameMessage = ""
+          if ($rulesContent -match "(?ms)tables:\s*\n\s*pattern:\s*['\`"](.+?)['\`"]\s*\n\s*message:\s*['\`"](.+?)['\`"]") {
+            $tableNamePattern = $matches[1]
+            $tableNameMessage = $matches[2]
+          }
+          
+          $columnNamePattern = ""
+          $columnNameMessage = ""
+          if ($rulesContent -match "(?ms)columns:\s*\n\s*pattern:\s*['\`"](.+?)['\`"]\s*\n\s*message:\s*['\`"](.+?)['\`"]") {
+            $columnNamePattern = $matches[1]
+            $columnNameMessage = $matches[2]
+          }
+          
+          # Parse performance_checks
+          $performanceEnabled = $false
+          if ($rulesContent -match '(?m)^performance_checks:\s*\n\s*enabled:\s*true') {
+            $performanceEnabled = $true
+          }
+          
+          # Parse security_checks
+          $securityEnabled = $false
+          if ($rulesContent -match '(?m)^security_checks:\s*\n\s*enabled:\s*true') {
+            $securityEnabled = $true
+          }
+          
+          # Build rules object
+          $rules = @{
+            type_guards = @{
+              create = @{
+                enabled = ($createRules.Count -gt 0)
+                patterns = $createRules
+              }
+              alter = @{
+                enabled = ($alterRules.Count -gt 0)
+                patterns = $alterRules
+              }
+            }
+            naming_conventions = @{
+              enabled = $namingEnabled
+              table_pattern = $tableNamePattern
+              table_message = $tableNameMessage
+              column_pattern = $columnNamePattern
+              column_message = $columnNameMessage
+            }
+            performance_checks = @{
+              enabled = $performanceEnabled
+            }
+            security_checks = @{
+              enabled = $securityEnabled
+            }
+          }
+          
+          Write-Host "✅ Loaded rules:"
+          Write-Host "   - CREATE rules: $($createRules.Count) patterns"
+          Write-Host "   - ALTER rules: $($alterRules.Count) patterns"
+          Write-Host "   - Naming conventions: $(if($namingEnabled){'enabled'}else{'disabled'})"
+          Write-Host "   - Performance checks: $(if($performanceEnabled){'enabled'}else{'disabled'})"
+          Write-Host "   - Security checks: $(if($securityEnabled){'enabled'}else{'disabled'})"
+          
+          # Save rules to file for next step
+          $rules | ConvertTo-Json -Depth 10 | Set-Content "_validation_rules.json"
+          "rules_loaded=true" | Out-File $env:GITHUB_OUTPUT -Append
+
       - name: Validate SQL files
         if: steps.detect_projects.outputs.has_changes == 'true'
         run: |
@@ -151,11 +278,16 @@ jobs:
           Write-Host "VALIDATING SQL FILES"
           Write-Host "========================================="
           
-          # Load rules from YAML (simple parsing)
-          $rulesContent = Get-Content rules.yml -Raw
+          # Load rules
+          $rules = $null
+          if (Test-Path "_validation_rules.json") {
+            $rules = Get-Content "_validation_rules.json" | ConvertFrom-Json
+          }
           
           $projects = '${{ steps.detect_projects.outputs.projects }}'.Split(',') | Where-Object { $_ }
           $validationFailed = $false
+          $totalErrors = 0
+          $totalWarnings = 0
           
           foreach ($proj in $projects) {
             $fileList = "_changed_${proj}.txt"
@@ -173,21 +305,115 @@ jobs:
               
               $content = Get-Content $file -Raw
               $errors = @()
+              $warnings = @()
               
-              # Basic validations
-              if ($content -match '(?i)DROP\s+TABLE') {
-                $errors += "DROP TABLE detected (dangerous)"
-              }
-              if ($content -match '(?i)TRUNCATE\s+TABLE') {
-                $errors += "TRUNCATE TABLE detected"
-              }
-              if ($content -notmatch '(?i)GO\s*$') {
-                $errors += "Missing GO terminator"
+              # Detect SQL operation type
+              $isCreate = $content -match '(?i)\bCREATE\s+(TABLE|PROCEDURE|FUNCTION|VIEW)'
+              $isAlter = $content -match '(?i)\bALTER\s+(TABLE|PROCEDURE|FUNCTION|VIEW)'
+              $isDrop = $content -match '(?i)\bDROP\s+(TABLE|PROCEDURE|FUNCTION|VIEW)'
+              
+              if ($rules) {
+                # Apply CREATE rules
+                if ($isCreate -and $rules.type_guards.create.enabled) {
+                  foreach ($rule in $rules.type_guards.create.patterns) {
+                    if ($content -match $rule.pattern) {
+                      $msg = "$($rule.name): $($rule.message)"
+                      if ($rule.severity -eq "error") {
+                        $errors += $msg
+                      } else {
+                        $warnings += $msg
+                      }
+                    }
+                  }
+                }
+                
+                # Apply ALTER rules
+                if ($isAlter -and $rules.type_guards.alter.enabled) {
+                  foreach ($rule in $rules.type_guards.alter.patterns) {
+                    if ($content -match $rule.pattern) {
+                      $msg = "$($rule.name): $($rule.message)"
+                      if ($rule.severity -eq "error") {
+                        $errors += $msg
+                      } else {
+                        $warnings += $msg
+                      }
+                    }
+                  }
+                }
+                
+                # Apply naming conventions
+                if ($rules.naming_conventions.enabled) {
+                  # Check table names
+                  if ($isCreate -and $rules.naming_conventions.table_pattern) {
+                    if ($content -match '(?i)CREATE\s+TABLE\s+(?:\[?dbo\]?\.)?\[?(\w+)\]?') {
+                      $tableName = $matches[1]
+                      if ($tableName -notmatch $rules.naming_conventions.table_pattern) {
+                        $warnings += "Table naming: $($rules.naming_conventions.table_message) (found: $tableName)"
+                      }
+                    }
+                  }
+                  
+                  # Check column names
+                  if ($rules.naming_conventions.column_pattern) {
+                    $columnMatches = [regex]::Matches($content, '(?i)(?:ADD|ALTER COLUMN)\s+\[?(\w+)\]?\s+')
+                    foreach ($match in $columnMatches) {
+                      $columnName = $match.Groups[1].Value
+                      if ($columnName -notmatch $rules.naming_conventions.column_pattern) {
+                        $warnings += "Column naming: $($rules.naming_conventions.column_message) (found: $columnName)"
+                      }
+                    }
+                  }
+                }
+                
+                # Performance checks
+                if ($rules.performance_checks.enabled) {
+                  if ($content -match '(?i)\bSELECT\s+\*\s+FROM') {
+                    $warnings += "Performance: SELECT * detected (consider specifying columns)"
+                  }
+                }
+                
+                # Security checks
+                if ($rules.security_checks.enabled) {
+                  if ($content -match '(?i)\bEXEC\s*\(\s*@') {
+                    $warnings += "Security: Dynamic SQL detected (review for SQL injection risks)"
+                  }
+                  if ($content -match '(?i)\b(UPDATE|DELETE)\b(?!\s+.*\bWHERE\b)') {
+                    $errors += "Security: UPDATE/DELETE without WHERE clause detected"
+                  }
+                }
+              } else {
+                # Fallback to basic rules if rules.yml not loaded
+                if ($content -match '(?i)\bDROP\s+TABLE\b') {
+                  $errors += "DROP TABLE detected (dangerous operation)"
+                }
+                if ($content -match '(?i)\bTRUNCATE\s+TABLE\b') {
+                  $errors += "TRUNCATE TABLE detected (data loss risk)"
+                }
+                if ($content -match '(?i)\bDROP\s+DATABASE\b') {
+                  $errors += "DROP DATABASE detected (CRITICAL - not allowed)"
+                }
               }
               
+              # Check for GO terminator
+              if ($content -notmatch '(?i)\bGO\b\s*$') {
+                $errors += "Missing GO terminator at end of file"
+              }
+              
+              # Display warnings
+              if ($warnings.Count -gt 0) {
+                $warnings | ForEach-Object { 
+                  Write-Host "    ⚠️  WARNING: $_" -ForegroundColor Yellow 
+                  $totalWarnings++
+                }
+              }
+              
+              # Display errors
               if ($errors.Count -gt 0) {
                 Write-Host "    ❌ Validation FAILED" -ForegroundColor Red
-                $errors | ForEach-Object { Write-Host "       - $_" -ForegroundColor Red }
+                $errors | ForEach-Object { 
+                  Write-Host "       - $_" -ForegroundColor Red 
+                  $totalErrors++
+                }
                 $validationFailed = $true
               } else {
                 Write-Host "    ✅ Validation PASSED" -ForegroundColor Green
@@ -195,14 +421,21 @@ jobs:
             }
           }
           
+          Write-Host ""
+          Write-Host "========================================="
+          Write-Host "VALIDATION SUMMARY"
+          Write-Host "========================================="
+          Write-Host "Total errors: $totalErrors"
+          Write-Host "Total warnings: $totalWarnings"
+          
           if ($validationFailed) {
-            Write-Host ""
-            Write-Host "❌ SQL validation failed" -ForegroundColor Red
+            Write-Host "Status: ❌ FAILED" -ForegroundColor Red
+            Write-Host "========================================="
             throw "Validation failed"
           }
           
-          Write-Host ""
-          Write-Host "✅ All SQL files passed validation" -ForegroundColor Green
+          Write-Host "Status: ✅ PASSED" -ForegroundColor Green
+          Write-Host "========================================="
 
       - name: Deploy to STAGING (per project)
         if: steps.detect_projects.outputs.has_changes == 'true'
@@ -315,6 +548,7 @@ jobs:
           name: staging-deployment-logs
           path: |
             _changed_*.txt
+            _validation_rules.json
             deployment_log.json
           if-no-files-found: ignore
 
