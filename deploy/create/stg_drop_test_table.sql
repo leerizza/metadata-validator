@@ -1,0 +1,1 @@
+    DROP TABLE dbo.stg_test_table
