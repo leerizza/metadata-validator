@@ -139,8 +139,10 @@ jobs:
             return $t.Trim("'`"")
           }
 
-          # Read YAML as lines and parse indent-based keys/lists (fits your rules.yml structure)
-          $lines = Get-Content "rules.yml" -Raw -Encoding UTF8 -ErrorAction Stop -Delimiter "`n" | ForEach-Object { $_ }
+          # FIX: read once with -Raw, then split manually (no -Delimiter)
+          $text  = Get-Content "rules.yml" -Raw -Encoding UTF8 -ErrorAction Stop
+          $lines = $text -split "\r?\n"
+
           $root  = [ordered]@{}
           $stack = New-Object System.Collections.Stack
           $stack.Push(@{ indent = -1; node = $root; key = $null; container = $null })
