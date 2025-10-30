@@ -1,4 +1,4 @@
-name: Validate & Deploy to STAGING (With Python Validator)
+name: Validate & Deploy to STAGING (No Python)
 
 on:
   pull_request:
@@ -28,16 +28,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyyaml
 
       - name: Resolve sqlcmd
         shell: powershell
@@ -136,7 +126,7 @@ jobs:
             Write-Host "[INFO] No CREATE changes"
           }
 
-      - name: Validate CREATE files with Python
+      - name: Validate CREATE files with PowerShell
         if: steps.chg_create.outputs.has_changes == 'true'
         shell: powershell
         run: |
@@ -144,14 +134,47 @@ jobs:
           
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "Validating CREATE files with Python"
+          Write-Host "Validating CREATE files with PowerShell"
           Write-Host "=========================================="
           
           $files = Get-Content '_changed_create.txt'
-          $fileList = $files -join ' '
+          $validationFailed = $false
           
-          $result = python scripts/validate_sql.py --type create $fileList
-          if ($LASTEXITCODE -ne 0) {
+          foreach ($file in $files) {
+            if (!(Test-Path $file)) {
+              Write-Host "[ERROR] File not found: $file"
+              $validationFailed = $true
+              continue
+            }
+            
+            $content = Get-Content $file -Raw
+            Write-Host "Validating: $file"
+            
+            # Basic SQL validation rules for CREATE
+            if ($content -match '(?i)\bDROP\s+TABLE\b') {
+              Write-Host "[ERROR] CREATE file contains DROP TABLE: $file"
+              $validationFailed = $true
+            }
+            
+            if ($content -match '(?i)\bDELETE\s+FROM\b') {
+              Write-Host "[ERROR] CREATE file contains DELETE: $file"
+              $validationFailed = $true
+            }
+            
+            if ($content -match '(?i)\bUPDATE\s+\w+\b') {
+              Write-Host "[ERROR] CREATE file contains UPDATE: $file"
+              $validationFailed = $true
+            }
+            
+            # Check if it actually contains CREATE statement
+            if ($content -notmatch '(?i)\bCREATE\s+(TABLE|VIEW|PROCEDURE|FUNCTION|INDEX)\b') {
+              Write-Host "[WARNING] CREATE file may not contain CREATE statement: $file"
+            }
+            
+            Write-Host "[OK] Validation passed: $file"
+          }
+          
+          if ($validationFailed) {
             throw "SQL validation failed for CREATE files"
           }
 
@@ -188,7 +211,7 @@ jobs:
             "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
           }
 
-      - name: Validate ALTER files with Python
+      - name: Validate ALTER files with PowerShell
         if: steps.chg_alter.outputs.has_changes == 'true'
         shell: powershell
         run: |
@@ -196,14 +219,42 @@ jobs:
           
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "Validating ALTER files with Python"
+          Write-Host "Validating ALTER files with PowerShell"
           Write-Host "=========================================="
           
           $files = Get-Content '_changed_alter.txt'
-          $fileList = $files -join ' '
+          $validationFailed = $false
           
-          $result = python scripts/validate_sql.py --type alter $fileList
-          if ($LASTEXITCODE -ne 0) {
+          foreach ($file in $files) {
+            if (!(Test-Path $file)) {
+              Write-Host "[ERROR] File not found: $file"
+              $validationFailed = $true
+              continue
+            }
+            
+            $content = Get-Content $file -Raw
+            Write-Host "Validating: $file"
+            
+            # Basic SQL validation rules for ALTER
+            if ($content -match '(?i)\bDROP\s+TABLE\b') {
+              Write-Host "[ERROR] ALTER file contains DROP TABLE: $file"
+              $validationFailed = $true
+            }
+            
+            if ($content -match '(?i)\bDELETE\s+FROM\b') {
+              Write-Host "[ERROR] ALTER file contains DELETE: $file"
+              $validationFailed = $true
+            }
+            
+            # Check if it contains ALTER statement
+            if ($content -notmatch '(?i)\bALTER\s+(TABLE|VIEW|PROCEDURE|FUNCTION)\b') {
+              Write-Host "[WARNING] ALTER file may not contain ALTER statement: $file"
+            }
+            
+            Write-Host "[OK] Validation passed: $file"
+          }
+          
+          if ($validationFailed) {
             throw "SQL validation failed for ALTER files"
           }
 
@@ -238,6 +289,53 @@ jobs:
             "" | Set-Content -Encoding UTF8 -LiteralPath $outFile -NoNewline
             "has_changes=false" | Out-File $env:GITHUB_OUTPUT -Append
             "file_count=0" | Out-File $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Validate DROP files with PowerShell
+        if: steps.chg_drop.outputs.has_changes == 'true'
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Validating DROP files with PowerShell"
+          Write-Host "=========================================="
+          
+          $files = Get-Content '_changed_drop.txt'
+          $validationFailed = $false
+          
+          foreach ($file in $files) {
+            if (!(Test-Path $file)) {
+              Write-Host "[ERROR] File not found: $file"
+              $validationFailed = $true
+              continue
+            }
+            
+            $content = Get-Content $file -Raw
+            Write-Host "Validating: $file"
+            
+            # Basic SQL validation rules for DROP
+            if ($content -match '(?i)\bDELETE\s+FROM\b') {
+              Write-Host "[ERROR] DROP file contains DELETE: $file"
+              $validationFailed = $true
+            }
+            
+            if ($content -match '(?i)\bUPDATE\s+\w+\b') {
+              Write-Host "[ERROR] DROP file contains UPDATE: $file"
+              $validationFailed = $true
+            }
+            
+            # Check if it contains DROP statement
+            if ($content -notmatch '(?i)\bDROP\s+(TABLE|VIEW|PROCEDURE|FUNCTION)\b') {
+              Write-Host "[WARNING] DROP file may not contain DROP statement: $file"
+            }
+            
+            Write-Host "[OK] Validation passed: $file"
+          }
+          
+          if ($validationFailed) {
+            throw "SQL validation failed for DROP files"
           }
 
       - name: Upload change lists
