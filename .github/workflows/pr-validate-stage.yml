@@ -237,7 +237,8 @@ jobs:
                     if ($content -match '(?i)CREATE\s+TABLE\s+[\[\]]?(\w+)[\[\]]?') {
                       $tableName = $matches[1]
                       if ($tableName -notmatch $tablePattern) {
-                        Write-Host "[NAMING ERROR] $tableMessage: $tableName" -ForegroundColor Red
+                        # PERBAIKAN: Gunakan format string atau kurung kurawal untuk variable
+                        Write-Host ("[NAMING ERROR] {0}: {1}" -f $tableMessage, $tableName) -ForegroundColor Red
                         Write-Host "  File: $file" -ForegroundColor Red
                         $validationFailed = $true
                       }
@@ -268,7 +269,8 @@ jobs:
                     foreach ($match in $columnMatches) {
                       $columnName = $match.Groups[1].Value
                       if ($columnName -notmatch $columnPattern) {
-                        Write-Host "[NAMING ERROR] $columnMessage: $columnName" -ForegroundColor Red
+                        # PERBAIKAN: Gunakan format string atau kurung kurawal untuk variable
+                        Write-Host ("[NAMING ERROR] {0}: {1}" -f $columnMessage, $columnName) -ForegroundColor Red
                         Write-Host "  File: $file" -ForegroundColor Red
                         $validationFailed = $true
                       }
