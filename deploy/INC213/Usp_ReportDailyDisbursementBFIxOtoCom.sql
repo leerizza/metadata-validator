@@ -1,8 +1,8 @@
 DROP PROCEDURE IF EXISTS dbo.Usp_ReportDailyDisbursementBFIxOtoCom;
 GO
 CREATE procedure [dbo].[Usp_ReportDailyDisbursementBFIxOtoCom]                 
- @RunStartDt Varchar(100),                 
- @RunEndDt Varchar(100)                
+ @RunStartDt Varchar(MAX),                 
+ @RunEndDt Varchar(MAX)                
 as                
                 
                 
@@ -102,7 +102,7 @@ left join STG_ProductOffering pof with (nolock)on ag.ProductID = pof.ProductID
  and ag.BranchID = pof.BranchID                
  and ag.ProductOfferingID = pof.ProductOfferingID                
  and pof.Description like '%My car%'                
-left join                
+left join                 
  (                
  select fc.ID_Application,Product_Asset_Condition                 
  from DWBIBFI2_DWH..Fact_Contract fc with (nolock)                
@@ -115,7 +115,7 @@ left join dbo.STG_Supplier sp with (nolock) on ag.SupplierID = sp.SupplierID
 /* DMD 963 difixing agar data tdk double untuk product Shariah */                
 Left Join DB_Temp..Temp_InsuranceAssetHeader iah with (nolock) on ag.ApplicationID = iah.ApplicationID                
 --left join STG_InsuranceAssetHeader iah with (nolock) on ag.ApplicationID = iah.ApplicationID                 
-left join                
+left join                 
  (                
  select poall.ApplicationID, isnull(sum(POTotal)-nfd.POnfd,sum(POTotal)) ApAmountnet                  
  from STG_PurchaseOrder poall with (nolock)                
@@ -129,7 +129,7 @@ left join
  group by poall.ApplicationID,nfd.POnfd                 
  )aan                
  on ag.ApplicationID = aan.ApplicationID                
-left join                
+left join                 
  (                
  SELECT aa.ApplicationID, aa.APStatusDate                 
  FROM                
@@ -152,7 +152,7 @@ left join
  WHERE aa.rn = 1                
  )ap                
  on ap.ApplicationID = po.ApplicationID                
-left join                
+left join                 
  (                
  select isc.ApplicationID,isc.DueDate                 
  from DWBIBFI2_ODS.dbo.ODS_InstallmentSchedule  isc with (nolock)                
@@ -165,13 +165,13 @@ left join
   and isc.InsSeqNo = iscm.InsSeqNo                
  )firtins                
  on ag.ApplicationID = firtins.ApplicationID                
-left join                
+left join                 
  (                
  select ApplicationID, StampDutyFeeToCust+AdminFeeToCust PolAdminFee                
  from DB_Temp..Temp_InsuranceAssetHeader with (nolock)                
  )fee                
  on ag.ApplicationID = fee.ApplicationID                
-left join                
+left join                 
  (                
  select ApplicationID, sum(POTotal) POTotal                 
  from STG_PurchaseOrder with (nolock)                
@@ -181,6 +181,7 @@ left join
 where cast(ag.GoLiveDate as date) between @RunStart and @RunEnd                
 and ApplicationStep = 'GLV'                
 and (sp.SupplierName like '%NIM OTO COM%' or sp.SupplierID = 'S240614094');                
+                
                 
                 
 select                  
@@ -225,7 +226,11 @@ select
  , md.DisbursalDate                
  , md.DisbMonth                
  , md.FirstInstallmentDate                
- ,case when  cast(md.GoLiveDate as date) >= '2025-01-01' then (case when [EffectiveInterestRate(%)]>18.0 then 13.5+ 0.75*([EffectiveInterestRate(%)]-18.0)  else 13.5 end ) else md.HurdleRate end as HurdleRate          
+ --dmd 1013 stefanus          
+ --, md.HurdleRate                
+,case when  cast(md.GoLiveDate as date) >= '2025-01-01' then (case when [EffectiveInterestRate(%)]>18.0 then 13.5+ 0.75*([EffectiveInterestRate(%)]-18.0)  else 13.5 end ) else md.HurdleRate end as HurdleRate          
+ --END dmd 1013        
+ --          
  , md.SupplierID                
  , md.EffectiveInterestRatePMT                
  , md.HurdleRatePMT                
@@ -245,13 +250,16 @@ select
  ,ISNULL(a.lifeinsurancepremium, '0') as lifeinsurancepremium                
  ,(a.FiduciaFee + a.ProvisionFee + a.NotaryFee + a.SurveyFee + a.OtherFee)  as OtherFee                
  ,a.TDP                
- ,md.ActualLoanClosureDate        
+ --dmd 1013     stefanus          
+  ,md.ActualLoanClosureDate          
+  --end dmd 1013        
 INTO MainDailyDisbursement2                
 from MainDailyDisbursement md with (nolock)                
+/* DMD 977 add logic changes for TDP */                
 LEFT JOIN DWBIBFI2_STG..STG_Agreement a WITH (NOLOCK) on a.BranchID = md.BranchID and a.ApplicationID = md.ApplicationID                
 INNER JOIN DWBIBFI2_STG..STG_AgreementAsset b WITH (NOLOCK) ON a.BranchID = b.BranchID AND a.ApplicationID = b.ApplicationID                
 LEFT Join DWBIBFI2_STG..STG_AgreementAssetSupplier s With (nolock) On b.BranchID = s.BranchID And b.ApplicationID = s.ApplicationID And b.AssetSeqNo = s.AssetSeqNo                
-LEFT JOIN                
+LEFT JOIN                 
  (                
  select sum(i.PaidAmountByCustomer) as PaidAmountByCustomer,                 
   i.ApplicationID,                 
@@ -259,6 +267,7 @@ LEFT JOIN
  from DWBIBFI2_STG..STG_InsuranceAssetHeader i with (nolock)                 
  group by i.ApplicationID, i.BranchID                
  ) ins on ins.BranchId = a.BranchID and ins.ApplicationID = a.ApplicationID;                
+                
                 
                 
 select                 
@@ -317,8 +326,10 @@ select
  , NULL DealerAgentRefundAsPerFinanciersScheme                 
  , EffectiveInterestRatePMT                
  , HurdleRatePMT                
+ --dmd 1013     stefanus          
  ,ActualLoanClosureDate            
  ,([EffectiveInterestRate(%)]-HurdleRate)[Oto Share%]          
+ --end dmd 1013        
  into MainDailyDisbursement3                
 from MainDailyDisbursement2 with (nolock);                
                 
@@ -326,6 +337,7 @@ from MainDailyDisbursement2 with (nolock);
 select                 
  GoliveMonth                
  , GoLiveDate                
+ --, ApplicationID                
  , CustomerName                
  , PONo                
  , AgreementNo                 
@@ -376,8 +388,10 @@ select
  , DealerAgentRefundAsPerFinanciersScheme                
  , EffectiveInterestRatePMT                
  , HurdleRatePMT          
+ --dmd 1013   Stefanus          
  ,ActualLoanClosureDate            
  ,[Oto Share%]          
+ --end dmd 1013        
 into MainDailyDisbursement4                
 from MainDailyDisbursement3 with (nolock);                
                 
@@ -438,8 +452,10 @@ select
   , EffectiveInterestRatePMT / 12 AS MonthlyInterestRate                
         , (GrossLoanAmount * (EffectiveInterestRatePMT / 12)) / (1 - POWER(1 + (EffectiveInterestRatePMT / 12), -Tenor)) AS MonthlyPayment                
   , ((GrossLoanAmount * (EffectiveInterestRatePMT / 12)) / (1 - POWER(1 + (EffectiveInterestRatePMT / 12), -Tenor))* Tenor - GrossLoanAmount) AS CumulativeInterest                
-  , ActualLoanClosureDate              
+  --dmd 1013 Stefanus          
+ , ActualLoanClosureDate              
   ,[Oto Share%]          
+  --end dmd 1013        
 into MainDailyDisbursement5                
 from MainDailyDisbursement4 with (nolock);                
                 
@@ -501,10 +517,13 @@ select
   , MonthlyInterestRate                
         , MonthlyPayment                
   , CumulativeInterest                
-  , ActualLoanClosureDate              
+   --dmd 1013 Stefanus          
+ , ActualLoanClosureDate              
   ,[Oto Share%]          
+  --end dmd 1013        
 into MainDailyDisbursement6                
 from MainDailyDisbursement5 with (nolock);                
+                
                 
                 
                 
@@ -567,6 +586,7 @@ select
   , a.MonthlyInterestRate                
   , a.MonthlyPayment                
   , a.CumulativeInterest                
+   --dmd 1013 Stefanus          
   ,a.ActualLoanClosureDate              
   ,a.[Oto Share%]              
   ,x.InsSeqNo TotalInstalmentReceived              
@@ -577,36 +597,23 @@ select
   ,case when  x.PaidDate is not null and x.PaidAmount = x.InstallmentAmount then 'Active'           
          else 'Not Active'            
    end as LoanStatus            
+  --end dmd 1013             
 into db_temp..Temp_MainDailyDisbursement                
 from MainDailyDisbursement6 a with (nolock)             
+--Add stefanus dmd 1013        
 inner join DWBIBFI2_STG..STG_Agreement b with (nolock) on a.AgreementNo = b.AgreementNo                  
-LEFT join (
-   select a.ApplicationID, a.InsSeqNo ,x.DaysOverdue, a.PaidDate, a.DueDate, PaidAmount, InstallmentAmount               
+LEFT join (            
+   select a.ApplicationID, a.InsSeqNo ,x.DaysOverdue, a.PaidDate       ,a.DueDate   ,PaidAmount , InstallmentAmount               
    from DWBIBFI2_ODS.dbo.ODS_InstallmentSchedule a with(nolock)         
-   LEFT JOIN (
-     select AgingDate,ApplicationID,DaysOverdue,InstallmentNo from DWBIBFI2_ODS.dbo.ODS_DailyAging a       
-     where cast(a.AgingDate as date) =  cast(GETDATE()-1 as date)         
-     union       
-     select AgingDate,ApplicationID,DaysOverdue,InstallmentNo from DWBIBFI2_ODS.dbo.ODS_DailyAging_Archieve_Daily b       
-     where cast(b.AgingDate as date) =  cast(GETDATE()-1 as date)        
+   LEFT JOIN       
+   (      
+   select AgingDate,ApplicationID,DaysOverdue,InstallmentNo from DWBIBFI2_ODS.dbo.ODS_DailyAging a       
+   where cast(a.AgingDate as date) =  cast(GETDATE()-1 as date)         
+   union       
+   select AgingDate,ApplicationID,DaysOverdue,InstallmentNo from DWBIBFI2_ODS.dbo.ODS_DailyAging_Archieve_Daily b       
+   where cast(b.AgingDate as date) =  cast(GETDATE()-1 as date)        
    ) x on a.ApplicationID = x.ApplicationID and x.InstallmentNo = a.InsSeqNo      
    where a.PaidDate  is not null      
-) x on x.ApplicationID = b.ApplicationID
-
-/* =========================================================
-   NEGATIVE TEST BLOCK — SAFE (never executed)
-   Tujuan: memicu validator tanpa efek ke data
-   ========================================================= */
-IF (1 = 0)
-BEGIN
-    -- 1) Trigger ALTER MAX-type (error)
-    ALTER TABLE db_temp..Temp_MainDailyDisbursement ADD DebugCol VARCHAR(100);
-
-    -- 2) Trigger TRUNCATE TABLE (security/data-loss)
-    TRUNCATE TABLE db_temp..Temp_MainDailyDisbursement;
-
-    -- 3) Trigger DROP TABLE (warning/error tergantung rule)
-    DROP TABLE db_temp..Temp_MainDailyDisbursement;
-END
-/* ======================================================= */
-GO
+) x on x.ApplicationID = b.ApplicationID        
+--end stefanus dmd 1013                
+where 1=1;
