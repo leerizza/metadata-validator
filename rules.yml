@@ -24,10 +24,11 @@ type_guards:
           bad: "description TEXT"
           good: "description NVARCHAR(4000)"
       
-      - pattern: '\bDROP\s+TABLE\b'
-        name: "DROP TABLE in CREATE"
-        message: "DROP TABLE statements are not allowed in CREATE scripts"
+      - pattern: '\bDROP\s+TABLE\s+(?!IF\s+EXISTS)(?!.*#)'
+        name: "DROP TABLE without IF EXISTS"
+        message: "DROP TABLE should use 'IF EXISTS' or be for temp tables only"
         severity: error
+        reason: "Prevents accidental table drops"
       
       - pattern: '\bTRUNCATE\s+TABLE\b'
         name: "TRUNCATE TABLE"
@@ -47,10 +48,6 @@ type_guards:
         name: "MAX data types"
         message: "Cannot ALTER columns to VARCHAR(MAX), NVARCHAR(MAX), or VARBINARY(MAX)"
         severity: error
-      - pattern: '\bALTER\s+TABLE\b[\s\S]*?\bALTER\s+COLUMN\b[\s\S]*?\b(n?varchar|varbinary)\s*\(\s*max\s*\)'
-        name: "MAX data types (ALTER COLUMN)"
-        message: "ALTER COLUMN ke *MAX tidak diperbolehkan"
-        severity: error
         reason: "MAX types can cause performance degradation on large tables"
         examples:
           bad: "ALTER COLUMN description VARCHAR(MAX)"
@@ -67,10 +64,43 @@ type_guards:
         message: "Dropping columns can cause data loss and break existing applications"
         severity: warning
         reason: "Consider deprecating the column first"
+      
+      - pattern: '\bALTER\s+COLUMN\s+\w+\s+\w+\s+NOT\s+NULL\b'
+        name: "ALTER COLUMN to NOT NULL"
+        message: "Changing column to NOT NULL can fail if existing data contains NULLs"
+        severity: warning
+        reason: "Ensure all existing data is non-NULL first"
   
   drop:
     enabled: false
     description: "DROP statements are controlled by allowlist only"
+
+  procedure:
+    enabled: true
+    description: "Validation rules for STORED PROCEDURES"
+    disallowed_patterns:
+      - pattern: '\bWITH\s+\(\s*NOLOCK\s*\)'
+        name: "NOLOCK hint usage"
+        message: "WITH (NOLOCK) can cause dirty reads and inconsistent data"
+        severity: warning
+        reason: "Consider using READ UNCOMMITTED isolation level explicitly or SNAPSHOT isolation"
+      
+      - pattern: '\bDROP\s+TABLE\s+(?!\s*IF\s+EXISTS)(?!DB_Temp\.\.)'
+        name: "DROP TABLE in stored procedure"
+        message: "DROP TABLE without IF EXISTS (except for temp tables in DB_Temp)"
+        severity: warning
+        reason: "Use DROP TABLE IF EXISTS or ensure table exists before dropping"
+      
+      - pattern: '\bSELECT\s+.*\bINTO\s+(?!#|\@)(?!DB_Temp\.\.)'
+        name: "SELECT INTO permanent table"
+        message: "SELECT INTO creates permanent tables without explicit schema"
+        severity: warning
+        reason: "Consider using CREATE TABLE first or use temp tables (#table)"
+      
+      - pattern: '\bCREATE\s+PROCEDURE\s+(?!\[?dbo\]?\.)'
+        name: "Procedure without schema"
+        message: "Always specify schema for stored procedures (e.g., dbo.ProcedureName)"
+        severity: warning
 
 naming_conventions:
   enabled: false  # Set to true to enable naming validation
@@ -87,10 +117,17 @@ naming_conventions:
     examples:
       bad: "user_name, USERNAME, user-name"
       good: "UserName, FirstName, CreatedAt"
+  
+  procedures:
+    pattern: '^(Usp_|usp_)[A-Z][a-zA-Z0-9]*$'
+    message: "Stored procedures should start with 'Usp_' or 'usp_'"
+    examples:
+      bad: "GetUserData, sp_GetData"
+      good: "Usp_GetUserData, usp_ReportDaily"
 
 # Performance optimization checks
 performance_checks:
-  enabled: false  # Set to true to enable performance warnings
+  enabled: true  # ENABLED untuk detect performance issues
   rules:
     - name: "SELECT * usage"
       pattern: '\bSELECT\s+\*\s+FROM'
@@ -102,14 +139,20 @@ performance_checks:
       message: "Consider adding indexes on foreign key columns"
       severity: warning
     
-    - name: "NOLOCK hint"
-      pattern: '\bWITH\s+\(\s*NOLOCK\s*\)'
-      message: "NOLOCK can cause dirty reads, use READ UNCOMMITTED isolation level explicitly"
+    - name: "Excessive NOLOCK usage"
+      pattern: '(\bWITH\s+\(\s*NOLOCK\s*\).*?){5,}'
+      message: "Excessive use of NOLOCK hints detected (5+ times)"
+      severity: warning
+      reason: "Consider using SNAPSHOT isolation or READ UNCOMMITTED at session level"
+    
+    - name: "Nested views or functions"
+      pattern: '\bCREATE\s+(VIEW|FUNCTION).*\bFROM.*\b(VIEW|FUNCTION)\b'
+      message: "Nested views/functions can cause performance degradation"
       severity: warning
 
 # Security best practices
 security_checks:
-  enabled: false  # Set to true to enable security checks
+  enabled: true  # ENABLED untuk security validation
   rules:
     - name: "Dynamic SQL"
       pattern: '\bEXEC\s*\(\s*@'
@@ -117,7 +160,7 @@ security_checks:
       severity: warning
     
     - name: "Missing WHERE in UPDATE/DELETE"
-      pattern: '\b(UPDATE|DELETE)\b(?!.*\bWHERE\b)'
+      pattern: '\b(UPDATE|DELETE)\s+(?!.*\bWHERE\b)'
       message: "UPDATE/DELETE without WHERE clause will affect all rows"
       severity: error
     
@@ -127,13 +170,18 @@ security_checks:
       severity: warning
     
     - name: "SQL injection risk"
-      pattern: '\bEXECUTE\s+\('
+      pattern: '\bEXECUTE\s*\('
       message: "Ensure all dynamic SQL uses parameterized queries"
       severity: warning
+    
+    - name: "Hardcoded credentials"
+      pattern: '(password|pwd|passwd)\s*=\s*[''"]'
+      message: "Hardcoded credentials detected - use secure configuration"
+      severity: error
 
 # Data integrity checks
 data_integrity:
-  enabled: false  # Set to true to enable data integrity warnings
+  enabled: true  # ENABLED untuk data integrity
   rules:
     - name: "Missing primary key"
       pattern: '\bCREATE\s+TABLE\b(?!.*\bPRIMARY\s+KEY\b)'
@@ -149,10 +197,16 @@ data_integrity:
       pattern: '\bCREATE\s+TABLE\b(?!.*\b(CONSTRAINT|CHECK|DEFAULT)\b)'
       message: "Consider adding constraints (CHECK, DEFAULT, UNIQUE) for data validation"
       severity: warning
+    
+    - name: "ALTER COLUMN data type change"
+      pattern: '\bALTER\s+TABLE.*\bALTER\s+COLUMN\s+\w+\s+(VARCHAR|INT|DECIMAL|DATETIME)'
+      message: "Changing column data type can cause data loss or conversion errors"
+      severity: warning
+      reason: "Verify existing data is compatible with new data type"
 
 # Code quality checks
 code_quality:
-  enabled: false  # Set to true to enable code quality checks
+  enabled: true  # ENABLED untuk code quality
   rules:
     - name: "Missing comments"
       pattern: '^(?!.*--).*\bCREATE\s+(PROCEDURE|FUNCTION)\b'
@@ -168,11 +222,33 @@ code_quality:
       pattern: '\bDECLARE\s+\w+\s+CURSOR\b'
       message: "CURSORs can be slow, consider set-based operations"
       severity: warning
+    
+    - name: "Missing transaction handling"
+      pattern: '\b(INSERT|UPDATE|DELETE)\b(?!.*\b(BEGIN\s+TRAN|COMMIT|ROLLBACK)\b)'
+      message: "Consider wrapping DML statements in explicit transactions"
+      severity: warning
+    
+    - name: "Missing error handling"
+      pattern: '\bCREATE\s+PROCEDURE\b(?!.*\b(TRY|CATCH|RAISERROR)\b)'
+      message: "Stored procedures should include error handling (TRY/CATCH)"
+      severity: warning
 
 # Custom project-specific rules
 custom_rules:
-  enabled: false  # Set to true to enable custom rules
+  enabled: true  # ENABLED untuk custom rules
   rules:
+    - name: "Temp table in DB_Temp"
+      pattern: '\b(SELECT|INSERT)\s+INTO\s+DB_Temp\.\.'
+      message: "Using DB_Temp for temporary tables - ensure cleanup at end of procedure"
+      severity: warning
+      reason: "Temporary tables in DB_Temp should be dropped after use"
+    
+    - name: "Cross-database query"
+      pattern: '\bFROM\s+\w+\.\.\w+'
+      message: "Cross-database query detected - ensure proper permissions and availability"
+      severity: warning
+      reason: "Cross-database queries can fail if target database is unavailable"
+    
     - name: "Audit columns"
       pattern: '\bCREATE\s+TABLE\b(?!.*\b(CreatedAt|CreatedBy|UpdatedAt|UpdatedBy)\b)'
       message: "Tables should include audit columns: CreatedAt, CreatedBy, UpdatedAt, UpdatedBy"
@@ -184,8 +260,13 @@ custom_rules:
       severity: warning
     
     - name: "Schema prefix"
-      pattern: '\bCREATE\s+(TABLE|PROCEDURE|FUNCTION|VIEW)\s+(?!dbo\.)'
+      pattern: '\bCREATE\s+(TABLE|PROCEDURE|FUNCTION|VIEW)\s+(?!dbo\.|\[dbo\]\.)'
       message: "Always specify schema prefix (e.g., dbo.TableName)"
+      severity: warning
+    
+    - name: "Multiple DROP TABLE in procedure"
+      pattern: '(\bDROP\s+TABLE.*?){3,}'
+      message: "Multiple DROP TABLE statements - consider consolidating or using IF EXISTS"
       severity: warning
 
 # Deployment safety checks
@@ -195,14 +276,56 @@ deployment_safety:
     - name: "Missing GO terminator"
       pattern: '.*'  # Always check at end of file
       message: "SQL file must end with GO statement"
-      severity: error
+      severity: warning
     
     - name: "Multiple batches without GO"
       pattern: '\bCREATE\s+(PROCEDURE|FUNCTION|VIEW).*?\bCREATE\s+(PROCEDURE|FUNCTION|VIEW)'
       message: "Multiple CREATE statements should be separated by GO"
-      severity: error
+      severity: warning
     
-    - name: "USE database"
+    - name: "USE database statement"
       pattern: '\bUSE\s+\['
       message: "Do not use USE [database] statement, connection string determines target database"
+      severity: warning
+    
+    - name: "SET options without GO"
+      pattern: '\bSET\s+(ANSI_NULLS|QUOTED_IDENTIFIER)\s+(ON|OFF)(?!.*\bGO\b)'
+      message: "SET options should be followed by GO statement"
+      severity: warning
+
+# BFI-specific rules (based on your SQL scripts)
+bfi_custom_rules:
+  enabled: true
+  description: "Custom rules specific to BFI Finance SQL coding standards"
+  rules:
+    - name: "Stored procedure naming"
+      pattern: '\bCREATE\s+PROCEDURE\s+(?!.*Usp_)'
+      message: "Stored procedures should follow naming convention: Usp_ProcedureName"
+      severity: warning
+    
+    - name: "Parameter data types"
+      pattern: '@\w+\s+Varchar\s*\(\s*\d+\s*\)'
+      message: "Use NVARCHAR instead of VARCHAR for Unicode support"
+      severity: warning
+      reason: "VARCHAR may cause issues with international characters"
+    
+    - name: "Date parameter handling"
+      pattern: '@\w+(Date|Dt)\s+Varchar'
+      message: "Date parameters should be DATE or DATETIME type, not VARCHAR"
+      severity: warning
+      reason: "Use proper date types for better validation and performance"
+    
+    - name: "ROW_NUMBER without ORDER BY"
+      pattern: '\bROW_NUMBER\s*\(\s*\)\s+OVER\s*\(\s*PARTITION'
+      message: "ROW_NUMBER requires ORDER BY clause"
       severity: error
+    
+    - name: "FORMAT function usage"
+      pattern: '\bFORMAT\s*\('
+      message: "FORMAT function can be slow, consider CONVERT or CAST for better performance"
+      severity: warning
+    
+    - name: "ISNULL vs COALESCE"
+      pattern: '\bISNULL\s*\(\s*CASE'
+      message: "Consider using COALESCE instead of ISNULL with CASE statements"
+      severity: warning
