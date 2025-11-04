@@ -341,6 +341,21 @@ jobs:
           function Test-Pat([string]$s,[string]$p){ if([string]::IsNullOrEmpty($p)){ $false } else { [regex]::IsMatch($s,$p,$ROpts) } }
           function Get-LastLine([string]$s){ ($s -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | Select-Object -Last 1) }
 
+          function Format-RuleMessage($category,$r,$pat,$content) {
+            $nm = if ($r.PSObject.Properties['name'] -and -not [string]::IsNullOrWhiteSpace($r.name)) { ''+$r.name } elseif ($pat) { 'Pattern ' + $pat } else { 'Unnamed rule' }
+            $ms = if ($r.PSObject.Properties['message'] -and -not [string]::IsNullOrWhiteSpace($r.message)) { ''+$r.message } else { 'Rule triggered' }
+            $sample = ''
+            try {
+              $m = [regex]::Match($content, ''+$pat, $ROpts)
+              if ($m.Success) {
+                $val = $m.Value
+                if ($val.Length -gt 60) { $val = $val.Substring(0,60) + '…' }
+                $sample = ' (match: "' + $val + '")'
+              }
+            } catch {}
+            return ("{0} | {1} — {2}{3}" -f $category,$nm,$ms,$sample)
+          }
+
           $projects = '${{ steps.detect_projects.outputs.projects }}'.Split(',') | Where-Object { $_ }
           $validationFailed = $false
           $totalErrors = 0
@@ -371,10 +386,15 @@ jobs:
                   foreach ($r in $ruleList) {
                     $pat = '' + $r.pattern
                     if ([string]::IsNullOrEmpty($pat)) { continue }
-                    if (Test-Pat $content $pat) {
-                      $msg = ("{0}: {1} - {2}" -f $category, ('' + $r.name), ('' + $r.message))
-                      if ($r.severity -eq 'error') { $e += $msg } else { $w += $msg }
-                    }
+                    $matched = $false
+                    try { $matched = [regex]::IsMatch($content,$pat,$ROpts) } catch { $matched = $false }
+                    if (-not $matched) { continue }
+
+                    $sev = ('' + $r.severity)
+                    if ([string]::IsNullOrEmpty($sev)) { $sev = 'warning' } else { $sev = $sev.ToString().ToLower() }
+
+                    $msg = Format-RuleMessage $category $r $pat $content
+                    if ($sev -eq 'error') { $e += $msg } else { $w += $msg }
                   }
                   return @($e, $w)
                 }
@@ -387,9 +407,10 @@ jobs:
                 if ($rules.type_guards.alter.enabled -and $isAlter) {
                   $result = Apply-RuleSet $rules.type_guards.alter.rules $content "ALTER"
                   $errors += $result[0]; $warnings += $result[1]
+                  # safety net MAX
                   $contentNorm = ($content -replace '\s+', ' ')
                   if (Test-Pat $contentNorm '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)') {
-                    $errors += 'ALTER: MAX data types not allowed (VARCHAR(MAX)/NVARCHAR(MAX)/VARBINARY(MAX))'
+                    $errors += 'ALTER | MAX data types — VARCHAR(MAX)/NVARCHAR(MAX)/VARBINARY(MAX) are not allowed'
                   }
                 }
 
@@ -403,7 +424,7 @@ jobs:
                     if ($content -match '(?i)CREATE\s+TABLE\s+(?:\[?([a-zA-Z0-9_]+)\]?\.)?\[?([a-zA-Z0-9_]+)\]?') {
                       $tableName = $Matches[2]
                       if (-not (Test-Pat $tableName $rules.naming_conventions.tables.pattern)) {
-                        $warnings += ('NAMING: Table - ' + $rules.naming_conventions.tables.message + ' (found: ' + $tableName + ')')
+                        $warnings += ('NAMING | Table — ' + $rules.naming_conventions.tables.message + ' (found: ' + $tableName + ')')
                       }
                     }
                   }
@@ -412,7 +433,7 @@ jobs:
                     foreach ($m in $colMatches) {
                       $c = $m.Groups[1].Value
                       if (-not (Test-Pat $c $rules.naming_conventions.columns.pattern)) {
-                        $warnings += ('NAMING: Column - ' + $rules.naming_conventions.columns.message + ' (found: ' + $c + ')')
+                        $warnings += ('NAMING | Column — ' + $rules.naming_conventions.columns.message + ' (found: ' + $c + ')')
                       }
                     }
                   }
@@ -420,7 +441,7 @@ jobs:
                     if ($content -match '(?i)CREATE\s+PROCEDURE\s+(?:\[?([a-zA-Z0-9_]+)\]?\.)?\[?([a-zA-Z0-9_]+)\]?') {
                       $procName = $Matches[2]
                       if (-not (Test-Pat $procName $rules.naming_conventions.procedures.pattern)) {
-                        $warnings += ('NAMING: Procedure - ' + $rules.naming_conventions.procedures.message + ' (found: ' + $procName + ')')
+                        $warnings += ('NAMING | Procedure — ' + $rules.naming_conventions.procedures.message + ' (found: ' + $procName + ')')
                       }
                     }
                   }
@@ -453,34 +474,39 @@ jobs:
 
                 if ($rules.deployment_safety.enabled) {
                   foreach ($r in $rules.deployment_safety.rules) {
-                    if ($r.name -eq 'Missing GO terminator') {
+                    $rname = if ($r.PSObject.Properties['name'] -and $r.name) { ''+$r.name } else { 'Deployment rule' }
+                    $rmsg  = if ($r.PSObject.Properties['message'] -and $r.message) { ''+$r.message } else { 'Rule triggered' }
+
+                    if ($rname -eq 'Missing GO terminator') {
                       $last = Get-LastLine $content
                       if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) {
-                        $msg = 'DEPLOYMENT: Missing GO terminator - ' + $r.message
+                        $msg = 'DEPLOYMENT | ' + $rname + ' — ' + $rmsg
                         if ($r.severity -eq 'error') { $errors += $msg } else { $warnings += $msg }
                       }
                     } elseif ($r.pattern -and (Test-Pat $content ([string]$r.pattern))) {
-                      $msg = 'DEPLOYMENT: ' + $r.name + ' - ' + $r.message
+                      $msg = 'DEPLOYMENT | ' + $rname + ' — ' + $rmsg
                       if ($r.severity -eq 'error') { $errors += $msg } else { $warnings += $msg }
                     }
                   }
                 }
               } else {
-                if (Test-Pat $content '\bDROP\s+DATABASE\b') { $errors += 'DROP DATABASE detected (CRITICAL - not allowed)' }
-                if (Test-Pat $content '\bTRUNCATE\s+TABLE\b') { $errors += 'TRUNCATE TABLE detected (data loss risk)' }
-                if (Test-Pat $content '\bDROP\s+TABLE\b')     { $warnings += 'DROP TABLE detected' }
+                if (Test-Pat $content '\bDROP\s+DATABASE\b') { $errors += 'SECURITY | DROP DATABASE — not allowed' }
+                if (Test-Pat $content '\bTRUNCATE\s+TABLE\b') { $errors += 'SECURITY | TRUNCATE TABLE — data loss risk' }
+                if (Test-Pat $content '\bDROP\s+TABLE\b')     { $warnings += 'CUSTOM | DROP TABLE — review carefully' }
                 $last = Get-LastLine $content
-                if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) { $errors += 'SQL file must end with GO statement' }
+                if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) { $errors += 'DEPLOYMENT | Missing GO terminator — SQL file must end with GO' }
               }
 
-              foreach ($w in $warnings) { Write-Host ('    [WARN] ' + $w) -ForegroundColor Yellow; $totalWarnings++ }
+              $fileWarn = 0; $fileErr = 0
+              foreach ($w in $warnings) { Write-Host ('    [WARN] ' + $w) -ForegroundColor Yellow; $totalWarnings++; $fileWarn++ }
               if ($errors.Count -gt 0) {
                 Write-Host '    [FAIL] Validation FAILED' -ForegroundColor Red
-                foreach ($e in $errors) { Write-Host ('       - ' + $e) -ForegroundColor Red; $totalErrors++ }
+                foreach ($e in $errors) { Write-Host ('       - ' + $e) -ForegroundColor Red; $totalErrors++; $fileErr++ }
                 $validationFailed = $true
               } else {
                 Write-Host '    [OK] Validation PASSED' -ForegroundColor Green
               }
+              Write-Host ("    Summary: {0} warning(s), {1} error(s)" -f $fileWarn,$fileErr)
             }
           }
 
@@ -589,11 +615,11 @@ jobs:
             const fs = require('fs');
             const projects = '${{ steps.detect_projects.outputs.projects }}'.split(',').filter(Boolean);
             let status = '${{ job.status }}' === 'success' ? '✅ SUCCESS' : '❌ FAILED';
-            let comment = '## 🚀 Staging Deployment Report\n\n';
+            let comment = '## Staging Deployment Report\n\n';
             comment += `**Status:** ${status}\n`;
             comment += `**Environment:** STAGING\n`;
             comment += `**Projects deployed:** ${projects.length}\n\n`;
-            comment += '### 📁 Projects\n\n';
+            comment += '### Projects\n\n';
             for (const proj of projects) {
               comment += `#### ${proj}\n\n`;
               const fileList = `_changed_${proj}.txt`;
