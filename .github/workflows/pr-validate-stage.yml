@@ -227,15 +227,16 @@ jobs:
             if ($null -eq $cur) { return $default } else { return $cur }
           }
 
+          # NOTE: baca .rules (bukan .disallowed_patterns)
           $normalized = [ordered]@{
             type_guards = @{
               create = @{
                 enabled = [bool](Get-Path $root 'type_guards.create.enabled' $false)
-                rules   = As-Array (Get-Path $root 'type_guards.create.disallowed_patterns' @())
+                rules   = As-Array (Get-Path $root 'type_guards.create.rules' @())
               }
               alter = @{
                 enabled = [bool](Get-Path $root 'type_guards.alter.enabled' $false)
-                rules   = As-Array (Get-Path $root 'type_guards.alter.disallowed_patterns' @())
+                rules   = As-Array (Get-Path $root 'type_guards.alter.rules' @())
               }
               drop = @{
                 enabled = [bool](Get-Path $root 'type_guards.drop.enabled' $false)
@@ -243,7 +244,7 @@ jobs:
               }
               procedure = @{
                 enabled = [bool](Get-Path $root 'type_guards.procedure.enabled' $false)
-                rules   = As-Array (Get-Path $root 'type_guards.procedure.disallowed_patterns' @())
+                rules   = As-Array (Get-Path $root 'type_guards.procedure.rules' @())
               }
             }
             naming_conventions = @{
@@ -346,10 +347,8 @@ jobs:
           function Get-LastLine([string]$s) {
             return ($s -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | Select-Object -Last 1)
           }
-          # Helper ringkas, TIDAK berupa function untuk menghindari parsing error
           $fmtMsg = {
             param($category,$name,$message)
-            # Gunakan -f agar tidak kena parsing ":" sebagai drive/variable
             return ('{0}: {1} - {2}' -f $category, ('' + $name), ('' + $message))
           }
 
@@ -357,6 +356,7 @@ jobs:
           $validationFailed = $false
           $totalErrors = 0
           $totalWarnings = 0
+          $log = @()
 
           foreach ($proj in $projects) {
             $fileList = "_changed_$proj.txt"
@@ -378,7 +378,6 @@ jobs:
               $isProcedure = Test-Pat $content '\bCREATE\s+PROCEDURE\b'
 
               if ($rules) {
-                # Apply rules tanpa function definisi
                 foreach ($scope in @(
                   @{ enabled = $rules.type_guards.create.enabled; rules = $rules.type_guards.create.rules; cat = 'CREATE'; only = $isCreate },
                   @{ enabled = $rules.type_guards.alter.enabled;  rules = $rules.type_guards.alter.rules;  cat = 'ALTER';  only = $isAlter  },
@@ -396,7 +395,6 @@ jobs:
                   }
                 }
 
-                # Safety khusus untuk MAX pada ALTER
                 if ($rules.type_guards.alter.enabled -and $isAlter) {
                   $contentNorm = ($content -replace '\s+', ' ')
                   if (Test-Pat $contentNorm '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)') {
@@ -404,7 +402,6 @@ jobs:
                   }
                 }
 
-                # Naming conventions
                 if ($rules.naming_conventions.enabled) {
                   if ($isCreate -and $rules.naming_conventions.tables.pattern) {
                     if ($content -match '(?i)CREATE\s+TABLE\s+(?:\[?([a-zA-Z0-9_]+)\]?\.)?\[?([a-zA-Z0-9_]+)\]?') {
@@ -433,7 +430,6 @@ jobs:
                   }
                 }
 
-                # Bundel kategori lain-lain (pakai pola yang sama)
                 foreach ($grp in @(
                   @{ en=$rules.performance_checks.enabled; rules=$rules.performance_checks.rules; cat='PERFORMANCE' },
                   @{ en=$rules.security_checks.enabled;    rules=$rules.security_checks.rules;    cat='SECURITY' },
@@ -454,7 +450,6 @@ jobs:
                   }
                 }
 
-                # Deployment safety
                 if ($rules.deployment_safety.enabled) {
                   foreach ($r in $rules.deployment_safety.rules) {
                     if ($r.name -eq 'Missing GO terminator') {
@@ -469,9 +464,7 @@ jobs:
                     }
                   }
                 }
-              }
-              else {
-                # Fallback minimal checks
+              } else {
                 if (Test-Pat $content '\bDROP\s+DATABASE\b') { $errors += 'DROP DATABASE detected (CRITICAL - not allowed)' }
                 if (Test-Pat $content '\bTRUNCATE\s+TABLE\b') { $errors += 'TRUNCATE TABLE detected (data loss risk)' }
                 if (Test-Pat $content '\bDROP\s+TABLE\b')     { $warnings += 'DROP TABLE detected' }
@@ -487,8 +480,40 @@ jobs:
               } else {
                 Write-Host '    [OK] Validation PASSED' -ForegroundColor Green
               }
+
+              $log += @{
+                project = $proj
+                file    = $file
+                errors  = $errors
+                warnings= $warnings
+              }
             }
           }
+
+          # Tulis report artifact
+          $log | ConvertTo-Json -Depth 10 | Set-Content 'validation_log.json' -Encoding UTF8
+          $md = @()
+          $md += '# SQL Validation Report'
+          $md += ''
+          $md += ('- Total errors: ' + $totalErrors)
+          $md += ('- Total warnings: ' + $totalWarnings)
+          $md += ''
+          foreach ($entry in $log) {
+            $rel = $entry.file
+            $md += ('## ' + $rel)
+            if ($entry.errors.Count -gt 0) {
+              $md += ''
+              $md += '**Errors:**'
+              foreach ($e in $entry.errors) { $md += ('- ' + $e) }
+            }
+            if ($entry.warnings.Count -gt 0) {
+              $md += ''
+              $md += '**Warnings:**'
+              foreach ($w in $entry.warnings) { $md += ('- ' + $w) }
+            }
+            $md += ''
+          }
+          $md -join "`r`n" | Set-Content 'validation_report.md' -Encoding UTF8
 
           Write-Host ''
           Write-Host '========================================='
@@ -576,7 +601,7 @@ jobs:
 
           $deploymentLog | ConvertTo-Json | Set-Content 'deployment_log.json' -Encoding UTF8
 
-      - name: Upload deployment artifacts
+      - name: Upload validation & deployment artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -584,6 +609,8 @@ jobs:
           path: |
             _changed_*.txt
             _validation_rules.json
+            validation_log.json
+            validation_report.md
             deployment_log.json
           if-no-files-found: ignore
 
@@ -599,7 +626,16 @@ jobs:
             let comment = '## Staging Deployment Report\n\n';
             comment += `**Status:** ${status}\n`;
             comment += `**Environment:** STAGING\n`;
-            comment += `**Projects deployed:** ${projects.length}\n\n`;
+            comment += `**Projects changed:** ${projects.length}\n\n`;
+
+            // If validation report exists, attach quick summary
+            if (fs.existsSync('validation_report.md')) {
+              const rep = fs.readFileSync('validation_report.md', 'utf8');
+              const header = rep.split('\n').slice(0, 5).join('\n');
+              comment += '### Validation Summary\n\n';
+              comment += header + '\n\n';
+            }
+
             comment += '### Projects\n\n';
             for (const proj of projects) {
               comment += `#### ${proj}\n\n`;
@@ -615,6 +651,7 @@ jobs:
                 comment += '\n';
               }
             }
+            comment += '\n_See artifacts for full validation details._\n';
             comment += '\n---\n';
             comment += `_Deployed at ${new Date().toISOString()}_`;
             try {
