@@ -125,7 +125,7 @@ jobs:
           $ErrorActionPreference='Stop'
           if (-not (Test-Path "rules.yml")) {
             Write-Host "⚠️ rules.yml not found, using basic validation"
-            Add-Content -Path $env:GITHUB_OUTPUT -Value "rules_loaded=false"
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'rules_loaded=false'
             exit 0
           }
 
@@ -140,7 +140,7 @@ jobs:
           }
 
           $text  = Get-Content "rules.yml" -Raw -Encoding UTF8 -ErrorAction Stop
-          $lines = $text -split "\r?\n"
+          $lines = $text -split "`r?`n"
 
           $root  = [ordered]@{}
           $stack = New-Object System.Collections.Stack
@@ -151,7 +151,8 @@ jobs:
             $trim = $raw.Trim()
             if ($trim -eq "" -or $trim.StartsWith("#")) { continue }
 
-            $indent = ([regex]::Match($raw, '^( *)')).Groups[1].Value.Length
+            $indentMatch = [regex]::Match($raw, '^( *)')
+            $indent = $indentMatch.Groups[1].Value.Length
             while ($stack.Count -gt 0 -and $indent -le $stack.Peek().indent) { [void]$stack.Pop() }
             $parent = $stack.Peek()
 
@@ -166,7 +167,8 @@ jobs:
                   $parent.node = $a
                 }
               }
-              if ($rest -match '^\s*([^:]+)\s*:\s*(.+)$') {
+              $colonPattern = '^\s*(.+?)\s*:\s*(.+)$'
+              if ($rest -match $colonPattern) {
                 $item = [ordered]@{}
                 $item[$Matches[1].Trim()] = Convert-Scalar $Matches[2]
               } elseif ($rest.Length -gt 0) {
@@ -315,7 +317,7 @@ jobs:
           Write-Host "   - Deployment safety: $($normalized.deployment_safety.rules.Count)"
 
           ($normalized | ConvertTo-Json -Depth 50) | Set-Content "_validation_rules.json" -Encoding UTF8
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "rules_loaded=true"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value 'rules_loaded=true'
 
       - name: Validate SQL files
         if: steps.detect_projects.outputs.has_changes == 'true'
