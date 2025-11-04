@@ -335,25 +335,22 @@ jobs:
           }
 
           Add-Type -AssemblyName 'System.Core' | Out-Null
-          $ROpts = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor `
-                   [System.Text.RegularExpressions.RegexOptions]::Singleline -bor `
-                   [System.Text.RegularExpressions.RegexOptions]::Multiline
-          function Test-Pat([string]$s,[string]$p){ if([string]::IsNullOrEmpty($p)){ $false } else { [regex]::IsMatch($s,$p,$ROpts) } }
-          function Get-LastLine([string]$s){ ($s -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | Select-Object -Last 1) }
+          $ROpts = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase `
+                  -bor [System.Text.RegularExpressions.RegexOptions]::Singleline `
+                  -bor [System.Text.RegularExpressions.RegexOptions]::Multiline
 
-          function Format-RuleMessage($category,$r,$pat,$content) {
-            $nm = if ($r.PSObject.Properties['name'] -and -not [string]::IsNullOrWhiteSpace($r.name)) { ''+$r.name } elseif ($pat) { 'Pattern ' + $pat } else { 'Unnamed rule' }
-            $ms = if ($r.PSObject.Properties['message'] -and -not [string]::IsNullOrWhiteSpace($r.message)) { ''+$r.message } else { 'Rule triggered' }
-            $sample = ''
-            try {
-              $m = [regex]::Match($content, ''+$pat, $ROpts)
-              if ($m.Success) {
-                $val = $m.Value
-                if ($val.Length -gt 60) { $val = $val.Substring(0,60) + '…' }
-                $sample = ' (match: "' + $val + '")'
-              }
-            } catch {}
-            return ("{0} | {1} — {2}{3}" -f $category,$nm,$ms,$sample)
+          function Test-Pat([string]$s, [string]$p) {
+            if ([string]::IsNullOrEmpty($p)) { return $false }
+            return [regex]::IsMatch($s, $p, $ROpts)
+          }
+          function Get-LastLine([string]$s) {
+            return ($s -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | Select-Object -Last 1)
+          }
+          # Helper ringkas, TIDAK berupa function untuk menghindari parsing error
+          $fmtMsg = {
+            param($category,$name,$message)
+            # Gunakan -f agar tidak kena parsing ":" sebagai drive/variable
+            return ('{0}: {1} - {2}' -f $category, ('' + $name), ('' + $message))
           }
 
           $projects = '${{ steps.detect_projects.outputs.projects }}'.Split(',') | Where-Object { $_ }
@@ -362,7 +359,7 @@ jobs:
           $totalWarnings = 0
 
           foreach ($proj in $projects) {
-            $fileList = "_changed_" + $proj + ".txt"
+            $fileList = "_changed_$proj.txt"
             if (!(Test-Path $fileList)) { continue }
             Write-Host ''
             Write-Host ("Validating project: " + $proj)
@@ -381,50 +378,39 @@ jobs:
               $isProcedure = Test-Pat $content '\bCREATE\s+PROCEDURE\b'
 
               if ($rules) {
-                function Apply-RuleSet($ruleList, $content, [string]$category) {
-                  $e = @(); $w = @()
-                  foreach ($r in $ruleList) {
-                    $pat = '' + $r.pattern
-                    if ([string]::IsNullOrEmpty($pat)) { continue }
-                    $matched = $false
-                    try { $matched = [regex]::IsMatch($content,$pat,$ROpts) } catch { $matched = $false }
-                    if (-not $matched) { continue }
-
-                    $sev = ('' + $r.severity)
-                    if ([string]::IsNullOrEmpty($sev)) { $sev = 'warning' } else { $sev = $sev.ToString().ToLower() }
-
-                    $msg = Format-RuleMessage $category $r $pat $content
-                    if ($sev -eq 'error') { $e += $msg } else { $w += $msg }
+                # Apply rules tanpa function definisi
+                foreach ($scope in @(
+                  @{ enabled = $rules.type_guards.create.enabled; rules = $rules.type_guards.create.rules; cat = 'CREATE'; only = $isCreate },
+                  @{ enabled = $rules.type_guards.alter.enabled;  rules = $rules.type_guards.alter.rules;  cat = 'ALTER';  only = $isAlter  },
+                  @{ enabled = $rules.type_guards.procedure.enabled; rules = $rules.type_guards.procedure.rules; cat = 'PROCEDURE'; only = $isProcedure }
+                )) {
+                  if ($scope.enabled -and $scope.only) {
+                    foreach ($r in $scope.rules) {
+                      $pat = '' + $r.pattern
+                      if ([string]::IsNullOrEmpty($pat)) { continue }
+                      if (Test-Pat $content $pat) {
+                        $msg = & $fmtMsg $scope.cat $r.name $r.message
+                        if ($r.severity -eq 'error') { $errors += $msg } else { $warnings += $msg }
+                      }
+                    }
                   }
-                  return @($e, $w)
                 }
 
-                if ($rules.type_guards.create.enabled -and $isCreate) {
-                  $result = Apply-RuleSet $rules.type_guards.create.rules $content "CREATE"
-                  $errors += $result[0]; $warnings += $result[1]
-                }
-
+                # Safety khusus untuk MAX pada ALTER
                 if ($rules.type_guards.alter.enabled -and $isAlter) {
-                  $result = Apply-RuleSet $rules.type_guards.alter.rules $content "ALTER"
-                  $errors += $result[0]; $warnings += $result[1]
-                  # safety net MAX
                   $contentNorm = ($content -replace '\s+', ' ')
                   if (Test-Pat $contentNorm '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)') {
-                    $errors += 'ALTER | MAX data types — VARCHAR(MAX)/NVARCHAR(MAX)/VARBINARY(MAX) are not allowed'
+                    $errors += 'ALTER: MAX data types not allowed (VARCHAR(MAX)/NVARCHAR(MAX)/VARBINARY(MAX))'
                   }
                 }
 
-                if ($rules.type_guards.procedure.enabled -and $isProcedure) {
-                  $result = Apply-RuleSet $rules.type_guards.procedure.rules $content "PROCEDURE"
-                  $errors += $result[0]; $warnings += $result[1]
-                }
-
+                # Naming conventions
                 if ($rules.naming_conventions.enabled) {
                   if ($isCreate -and $rules.naming_conventions.tables.pattern) {
                     if ($content -match '(?i)CREATE\s+TABLE\s+(?:\[?([a-zA-Z0-9_]+)\]?\.)?\[?([a-zA-Z0-9_]+)\]?') {
                       $tableName = $Matches[2]
                       if (-not (Test-Pat $tableName $rules.naming_conventions.tables.pattern)) {
-                        $warnings += ('NAMING | Table — ' + $rules.naming_conventions.tables.message + ' (found: ' + $tableName + ')')
+                        $warnings += ('NAMING: Table - ' + $rules.naming_conventions.tables.message + ' (found: ' + $tableName + ')')
                       }
                     }
                   }
@@ -433,7 +419,7 @@ jobs:
                     foreach ($m in $colMatches) {
                       $c = $m.Groups[1].Value
                       if (-not (Test-Pat $c $rules.naming_conventions.columns.pattern)) {
-                        $warnings += ('NAMING | Column — ' + $rules.naming_conventions.columns.message + ' (found: ' + $c + ')')
+                        $warnings += ('NAMING: Column - ' + $rules.naming_conventions.columns.message + ' (found: ' + $c + ')')
                       }
                     }
                   }
@@ -441,72 +427,66 @@ jobs:
                     if ($content -match '(?i)CREATE\s+PROCEDURE\s+(?:\[?([a-zA-Z0-9_]+)\]?\.)?\[?([a-zA-Z0-9_]+)\]?') {
                       $procName = $Matches[2]
                       if (-not (Test-Pat $procName $rules.naming_conventions.procedures.pattern)) {
-                        $warnings += ('NAMING | Procedure — ' + $rules.naming_conventions.procedures.message + ' (found: ' + $procName + ')')
+                        $warnings += ('NAMING: Procedure - ' + $rules.naming_conventions.procedures.message + ' (found: ' + $procName + ')')
                       }
                     }
                   }
                 }
 
-                if ($rules.performance_checks.enabled) {
-                  $result = Apply-RuleSet $rules.performance_checks.rules $content "PERFORMANCE"
-                  $errors += $result[0]; $warnings += $result[1]
-                }
-                if ($rules.security_checks.enabled) {
-                  $result = Apply-RuleSet $rules.security_checks.rules $content "SECURITY"
-                  $errors += $result[0]; $warnings += $result[1]
-                }
-                if ($rules.data_integrity.enabled) {
-                  $result = Apply-RuleSet $rules.data_integrity.rules $content "DATA INTEGRITY"
-                  $errors += $result[0]; $warnings += $result[1]
-                }
-                if ($rules.code_quality.enabled) {
-                  $result = Apply-RuleSet $rules.code_quality.rules $content "CODE QUALITY"
-                  $errors += $result[0]; $warnings += $result[1]
-                }
-                if ($rules.custom_rules.enabled) {
-                  $result = Apply-RuleSet $rules.custom_rules.rules $content "CUSTOM"
-                  $errors += $result[0]; $warnings += $result[1]
-                }
-                if ($rules.bfi_custom_rules.enabled) {
-                  $result = Apply-RuleSet $rules.bfi_custom_rules.rules $content "BFI"
-                  $errors += $result[0]; $warnings += $result[1]
+                # Bundel kategori lain-lain (pakai pola yang sama)
+                foreach ($grp in @(
+                  @{ en=$rules.performance_checks.enabled; rules=$rules.performance_checks.rules; cat='PERFORMANCE' },
+                  @{ en=$rules.security_checks.enabled;    rules=$rules.security_checks.rules;    cat='SECURITY' },
+                  @{ en=$rules.data_integrity.enabled;    rules=$rules.data_integrity.rules;    cat='DATA INTEGRITY' },
+                  @{ en=$rules.code_quality.enabled;      rules=$rules.code_quality.rules;      cat='CODE QUALITY' },
+                  @{ en=$rules.custom_rules.enabled;      rules=$rules.custom_rules.rules;      cat='CUSTOM' },
+                  @{ en=$rules.bfi_custom_rules.enabled;  rules=$rules.bfi_custom_rules.rules;  cat='BFI' }
+                )) {
+                  if ($grp.en) {
+                    foreach ($r in $grp.rules) {
+                      $pat = '' + $r.pattern
+                      if ([string]::IsNullOrEmpty($pat)) { continue }
+                      if (Test-Pat $content $pat) {
+                        $msg = & $fmtMsg $grp.cat $r.name $r.message
+                        if ($r.severity -eq 'error') { $errors += $msg } else { $warnings += $msg }
+                      }
+                    }
+                  }
                 }
 
+                # Deployment safety
                 if ($rules.deployment_safety.enabled) {
                   foreach ($r in $rules.deployment_safety.rules) {
-                    $rname = if ($r.PSObject.Properties['name'] -and $r.name) { ''+$r.name } else { 'Deployment rule' }
-                    $rmsg  = if ($r.PSObject.Properties['message'] -and $r.message) { ''+$r.message } else { 'Rule triggered' }
-
-                    if ($rname -eq 'Missing GO terminator') {
+                    if ($r.name -eq 'Missing GO terminator') {
                       $last = Get-LastLine $content
                       if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) {
-                        $msg = 'DEPLOYMENT | ' + $rname + ' — ' + $rmsg
+                        $msg = & $fmtMsg 'DEPLOYMENT' $r.name $r.message
                         if ($r.severity -eq 'error') { $errors += $msg } else { $warnings += $msg }
                       }
                     } elseif ($r.pattern -and (Test-Pat $content ([string]$r.pattern))) {
-                      $msg = 'DEPLOYMENT | ' + $rname + ' — ' + $rmsg
+                      $msg = & $fmtMsg 'DEPLOYMENT' $r.name $r.message
                       if ($r.severity -eq 'error') { $errors += $msg } else { $warnings += $msg }
                     }
                   }
                 }
-              } else {
-                if (Test-Pat $content '\bDROP\s+DATABASE\b') { $errors += 'SECURITY | DROP DATABASE — not allowed' }
-                if (Test-Pat $content '\bTRUNCATE\s+TABLE\b') { $errors += 'SECURITY | TRUNCATE TABLE — data loss risk' }
-                if (Test-Pat $content '\bDROP\s+TABLE\b')     { $warnings += 'CUSTOM | DROP TABLE — review carefully' }
+              }
+              else {
+                # Fallback minimal checks
+                if (Test-Pat $content '\bDROP\s+DATABASE\b') { $errors += 'DROP DATABASE detected (CRITICAL - not allowed)' }
+                if (Test-Pat $content '\bTRUNCATE\s+TABLE\b') { $errors += 'TRUNCATE TABLE detected (data loss risk)' }
+                if (Test-Pat $content '\bDROP\s+TABLE\b')     { $warnings += 'DROP TABLE detected' }
                 $last = Get-LastLine $content
-                if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) { $errors += 'DEPLOYMENT | Missing GO terminator — SQL file must end with GO' }
+                if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) { $errors += 'SQL file must end with GO statement' }
               }
 
-              $fileWarn = 0; $fileErr = 0
-              foreach ($w in $warnings) { Write-Host ('    [WARN] ' + $w) -ForegroundColor Yellow; $totalWarnings++; $fileWarn++ }
+              foreach ($w in $warnings) { Write-Host ('    [WARN] ' + $w) -ForegroundColor Yellow; $totalWarnings++ }
               if ($errors.Count -gt 0) {
                 Write-Host '    [FAIL] Validation FAILED' -ForegroundColor Red
-                foreach ($e in $errors) { Write-Host ('       - ' + $e) -ForegroundColor Red; $totalErrors++; $fileErr++ }
+                foreach ($e in $errors) { Write-Host ('       - ' + $e) -ForegroundColor Red; $totalErrors++ }
                 $validationFailed = $true
               } else {
                 Write-Host '    [OK] Validation PASSED' -ForegroundColor Green
               }
-              Write-Host ("    Summary: {0} warning(s), {1} error(s)" -f $fileWarn,$fileErr)
             }
           }
 
@@ -523,6 +503,7 @@ jobs:
           }
           Write-Host 'Status: PASSED' -ForegroundColor Green
           Write-Host '========================================='
+
 
       - name: Deploy to STAGING (per project)
         if: steps.detect_projects.outputs.has_changes == 'true'
