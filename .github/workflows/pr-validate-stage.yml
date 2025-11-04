@@ -185,8 +185,8 @@ jobs:
 
             $kv = $trim -split ':', 2
             if ($kv.Count -lt 2) { continue }
-            $key = $kv[0].Trim(' "`'')
-            $val = $kv[1].Trim()
+            $key = $kv[0].Trim(" '""")
+            $val = $kv[1].Trim(" '""")
 
             if ($parent.node -is [System.Collections.IList]) {
               $last = $parent.node[$parent.node.Count-1]
