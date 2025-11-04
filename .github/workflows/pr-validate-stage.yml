@@ -39,8 +39,8 @@ jobs:
           $sqlcmd = $sqlcmdPaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
           if (!$sqlcmd) { try { $sqlcmd = (where.exe sqlcmd 2>$null) } catch {} }
           if (!$sqlcmd) { throw "sqlcmd.exe not found" }
-          Write-Host "Using sqlcmd: $sqlcmd"
-          Add-Content -Path $env:GITHUB_ENV -Value "SQLCMD_EXE=$sqlcmd"
+          Write-Host ("Using sqlcmd: " + $sqlcmd)
+          Add-Content -Path $env:GITHUB_ENV -Value ("SQLCMD_EXE=" + $sqlcmd)
 
       - name: Test database connection
         env:
@@ -52,12 +52,12 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $PORT = if ($env:P) { $env:P } else { "1433" }
-          Write-Host "Testing connection to $env:H,$PORT..."
+          Write-Host ("Testing connection to {0},{1}..." -f $env:H,$PORT)
           $ok = Test-NetConnection -ComputerName $env:H -Port $PORT -InformationLevel Quiet -WarningAction SilentlyContinue
           if (!$ok) { throw "Cannot reach database host" }
           & $env:SQLCMD_EXE -S "$env:H,$PORT" -d $env:D -U $env:U -P $env:W -l 10 -b -C -Q "SELECT 1"
           if ($LASTEXITCODE -ne 0) { throw "Database login failed" }
-          Write-Host "✅ Database connection successful"
+          Write-Host "Database connection successful"
 
       - name: Detect changed projects
         id: detect_projects
@@ -86,12 +86,12 @@ jobs:
 
           if ($allFiles.Count -eq 0) {
             Write-Host 'No SQL files changed in deploy/.'
-            Add-Content -Path $env:GITHUB_OUTPUT -Value 'projects='
-            Add-Content -Path $env:GITHUB_OUTPUT -Value 'has_changes=false'
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "projects="
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "has_changes=false"
             exit 0
           }
 
-          $projects = @{}
+          $projects = @{ }
           foreach ($file in $allFiles) {
             if ($file -match '^deploy/([^/]+)/') {
               $proj = $Matches[1]
@@ -105,17 +105,17 @@ jobs:
           Write-Host 'CHANGED PROJECTS DETECTED'
           Write-Host '========================================='
           foreach ($p in $projects.Keys | Sort-Object) {
-            Write-Host ('📁 ' + $p + ' (' + ($projects[$p].Count) + ' files)')
+            Write-Host ('- ' + $p + ' (' + ($projects[$p].Count) + ' files)')
             $projects[$p] | Sort-Object | ForEach-Object { Write-Host ('   - ' + $_) }
           }
           Write-Host '========================================='
 
           $projectList = ($projects.Keys | Sort-Object) -join ','
-          Add-Content -Path $env:GITHUB_OUTPUT -Value ('projects=' + $projectList)
-          Add-Content -Path $env:GITHUB_OUTPUT -Value 'has_changes=true'
+          Add-Content -Path $env:GITHUB_OUTPUT -Value ("projects=" + $projectList)
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "has_changes=true"
 
           foreach ($p in $projects.Keys) {
-            $projects[$p] | Set-Content ('_changed_' + $p + '.txt') -Encoding UTF8
+            $projects[$p] | Set-Content ("_changed_" + $p + ".txt") -Encoding UTF8
           }
 
       - name: Load validation rules
@@ -124,8 +124,8 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           if (-not (Test-Path "rules.yml")) {
-            Write-Host "⚠️ rules.yml not found, using basic validation"
-            Add-Content -Path $env:GITHUB_OUTPUT -Value 'rules_loaded=false'
+            Write-Host "rules.yml not found, using basic validation"
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "rules_loaded=false"
             exit 0
           }
 
@@ -136,11 +136,11 @@ jobs:
             $t = $s.Trim()
             if ($t -match '^(?i:true|false)$') { return [bool]::Parse($t) }
             if ($t -match '^-?\d+(\.\d+)?$')   { return [double]$t }
-            return $t.Trim("'`"")
+            return $t.Trim(" '""")
           }
 
           $text  = Get-Content "rules.yml" -Raw -Encoding UTF8 -ErrorAction Stop
-          $lines = $text -split "`r?`n"
+          $lines = $text -split "\r?\n"
 
           $root  = [ordered]@{}
           $stack = New-Object System.Collections.Stack
@@ -291,7 +291,6 @@ jobs:
             }
           }
 
-          # Count loaded rules
           $totalRules = 0
           $totalRules += $normalized.type_guards.create.rules.Count
           $totalRules += $normalized.type_guards.alter.rules.Count
@@ -304,20 +303,20 @@ jobs:
           $totalRules += $normalized.bfi_custom_rules.rules.Count
           $totalRules += $normalized.deployment_safety.rules.Count
 
-          Write-Host '✅ Loaded $totalRules validation rules:''
-          Write-Host '   - CREATE rules: $($normalized.type_guards.create.rules.Count)'
-          Write-Host '   - ALTER rules: $($normalized.type_guards.alter.rules.Count)'
-          Write-Host '   - PROCEDURE rules: $($normalized.type_guards.procedure.rules.Count)'
-          Write-Host '   - Performance checks: $($normalized.performance_checks.rules.Count)'
-          Write-Host '   - Security checks: $($normalized.security_checks.rules.Count)'
-          Write-Host '   - Data integrity: $($normalized.data_integrity.rules.Count)'
-          Write-Host '   - Code quality: $($normalized.code_quality.rules.Count)'
-          Write-Host '   - Custom rules: $($normalized.custom_rules.rules.Count)'
-          Write-Host '   - BFI custom rules: $($normalized.bfi_custom_rules.rules.Count)'
-          Write-Host '   - Deployment safety: $($normalized.deployment_safety.rules.Count)'
+          Write-Host ("Loaded " + $totalRules + " validation rules")
+          Write-Host ("  - CREATE rules: " + $normalized.type_guards.create.rules.Count)
+          Write-Host ("  - ALTER rules: " + $normalized.type_guards.alter.rules.Count)
+          Write-Host ("  - PROCEDURE rules: " + $normalized.type_guards.procedure.rules.Count)
+          Write-Host ("  - Performance checks: " + $normalized.performance_checks.rules.Count)
+          Write-Host ("  - Security checks: " + $normalized.security_checks.rules.Count)
+          Write-Host ("  - Data integrity: " + $normalized.data_integrity.rules.Count)
+          Write-Host ("  - Code quality: " + $normalized.code_quality.rules.Count)
+          Write-Host ("  - Custom rules: " + $normalized.custom_rules.rules.Count)
+          Write-Host ("  - BFI custom rules: " + $normalized.bfi_custom_rules.rules.Count)
+          Write-Host ("  - Deployment safety: " + $normalized.deployment_safety.rules.Count)
 
-          ($normalized | ConvertTo-Json -Depth 50) | Set-Content '_validation_rules.json' -Encoding UTF8
-          Add-Content -Path $env:GITHUB_OUTPUT -Value 'rules_loaded=true'
+          ($normalized | ConvertTo-Json -Depth 50) | Set-Content "_validation_rules.json" -Encoding UTF8
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "rules_loaded=true"
 
       - name: Validate SQL files
         if: steps.detect_projects.outputs.has_changes == 'true'
@@ -328,11 +327,11 @@ jobs:
           Write-Host 'VALIDATING SQL FILES'
           Write-Host '========================================='
 
-          if (!(Test-Path '_validation_rules.json')) {
-            Write-Host ' Rules not loaded; using basic validation only'
+          if (!(Test-Path "_validation_rules.json")) {
+            Write-Host 'Rules not loaded; using basic validation only'
             $rules = $null
           } else {
-            $rules = Get-Content '_validation_rules.json' | ConvertFrom-Json
+            $rules = Get-Content "_validation_rules.json" | ConvertFrom-Json
           }
 
           Add-Type -AssemblyName 'System.Core' | Out-Null
@@ -340,7 +339,7 @@ jobs:
                    [System.Text.RegularExpressions.RegexOptions]::Singleline -bor `
                    [System.Text.RegularExpressions.RegexOptions]::Multiline
           function Test-Pat([string]$s,[string]$p){ if([string]::IsNullOrEmpty($p)){ $false } else { [regex]::IsMatch($s,$p,$ROpts) } }
-          function Last-Line([string]$s){ ($s -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | Select-Object -Last 1) }
+          function Get-LastLine([string]$s){ ($s -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | Select-Object -Last 1) }
 
           $projects = '${{ steps.detect_projects.outputs.projects }}'.Split(',') | Where-Object { $_ }
           $validationFailed = $false
@@ -348,16 +347,16 @@ jobs:
           $totalWarnings = 0
 
           foreach ($proj in $projects) {
-            $fileList = '_changed_' + $proj + '.txt'
+            $fileList = "_changed_" + $proj + ".txt"
             if (!(Test-Path $fileList)) { continue }
             Write-Host ''
-            Write-Host (' Validating project: ' + $proj)
+            Write-Host ("Validating project: " + $proj)
             $files = Get-Content $fileList
             foreach ($file in $files) {
               $file = $file.Trim()
               if (!(Test-Path $file)) { continue }
               $content = Get-Content $file -Raw
-              Write-Host ('  Checking: ' + $file)
+              Write-Host ("  Checking: " + $file)
 
               $errors = @()
               $warnings = @()
@@ -367,47 +366,39 @@ jobs:
               $isProcedure = Test-Pat $content '\bCREATE\s+PROCEDURE\b'
 
               if ($rules) {
-                # --- Helper function to apply generic rules ---
                 function Apply-RuleSet($ruleList, $content, [string]$category) {
                   $e = @(); $w = @()
                   foreach ($r in $ruleList) {
                     $pat = '' + $r.pattern
                     if ([string]::IsNullOrEmpty($pat)) { continue }
                     if (Test-Pat $content $pat) {
-                      $msg = "$category`: " + ('' + $r.name) + ' - ' + ('' + $r.message)
+                      $msg = "$category: " + ('' + $r.name) + ' - ' + ('' + $r.message)
                       if ($r.severity -eq 'error') { $e += $msg } else { $w += $msg }
                     }
                   }
                   return @($e, $w)
                 }
 
-                # --- TYPE GUARDS: CREATE ---
                 if ($rules.type_guards.create.enabled -and $isCreate) {
                   $result = Apply-RuleSet $rules.type_guards.create.rules $content "CREATE"
                   $errors += $result[0]; $warnings += $result[1]
                 }
 
-                # --- TYPE GUARDS: ALTER ---
                 if ($rules.type_guards.alter.enabled -and $isAlter) {
                   $result = Apply-RuleSet $rules.type_guards.alter.rules $content "ALTER"
                   $errors += $result[0]; $warnings += $result[1]
-                  
-                  # Safety net for MAX types
                   $contentNorm = ($content -replace '\s+', ' ')
                   if (Test-Pat $contentNorm '\b(?:n?varchar|varbinary)\s*\(\s*max\s*\)') {
                     $errors += 'ALTER: MAX data types not allowed (VARCHAR(MAX)/NVARCHAR(MAX)/VARBINARY(MAX))'
                   }
                 }
 
-                # --- TYPE GUARDS: PROCEDURE ---
                 if ($rules.type_guards.procedure.enabled -and $isProcedure) {
                   $result = Apply-RuleSet $rules.type_guards.procedure.rules $content "PROCEDURE"
                   $errors += $result[0]; $warnings += $result[1]
                 }
 
-                # --- NAMING CONVENTIONS ---
                 if ($rules.naming_conventions.enabled) {
-                  # Table names
                   if ($isCreate -and $rules.naming_conventions.tables.pattern) {
                     if ($content -match '(?i)CREATE\s+TABLE\s+(?:\[?([a-zA-Z0-9_]+)\]?\.)?\[?([a-zA-Z0-9_]+)\]?') {
                       $tableName = $Matches[2]
@@ -416,7 +407,6 @@ jobs:
                       }
                     }
                   }
-                  # Column names
                   if ($rules.naming_conventions.columns.pattern) {
                     $colMatches = [regex]::Matches($content,'(?i)(?:ADD|ALTER\s+COLUMN)\s+\[?([a-zA-Z0-9_]+)\]?\s+',$ROpts)
                     foreach ($m in $colMatches) {
@@ -426,7 +416,6 @@ jobs:
                       }
                     }
                   }
-                  # Procedure names
                   if ($isProcedure -and $rules.naming_conventions.procedures.pattern) {
                     if ($content -match '(?i)CREATE\s+PROCEDURE\s+(?:\[?([a-zA-Z0-9_]+)\]?\.)?\[?([a-zA-Z0-9_]+)\]?') {
                       $procName = $Matches[2]
@@ -437,47 +426,35 @@ jobs:
                   }
                 }
 
-                # --- PERFORMANCE CHECKS ---
                 if ($rules.performance_checks.enabled) {
                   $result = Apply-RuleSet $rules.performance_checks.rules $content "PERFORMANCE"
                   $errors += $result[0]; $warnings += $result[1]
                 }
-
-                # --- SECURITY CHECKS ---
                 if ($rules.security_checks.enabled) {
                   $result = Apply-RuleSet $rules.security_checks.rules $content "SECURITY"
                   $errors += $result[0]; $warnings += $result[1]
                 }
-
-                # --- DATA INTEGRITY ---
                 if ($rules.data_integrity.enabled) {
                   $result = Apply-RuleSet $rules.data_integrity.rules $content "DATA INTEGRITY"
                   $errors += $result[0]; $warnings += $result[1]
                 }
-
-                # --- CODE QUALITY ---
                 if ($rules.code_quality.enabled) {
                   $result = Apply-RuleSet $rules.code_quality.rules $content "CODE QUALITY"
                   $errors += $result[0]; $warnings += $result[1]
                 }
-
-                # --- CUSTOM RULES ---
                 if ($rules.custom_rules.enabled) {
                   $result = Apply-RuleSet $rules.custom_rules.rules $content "CUSTOM"
                   $errors += $result[0]; $warnings += $result[1]
                 }
-
-                # --- BFI CUSTOM RULES ---
                 if ($rules.bfi_custom_rules.enabled) {
                   $result = Apply-RuleSet $rules.bfi_custom_rules.rules $content "BFI"
                   $errors += $result[0]; $warnings += $result[1]
                 }
 
-                # --- DEPLOYMENT SAFETY ---
                 if ($rules.deployment_safety.enabled) {
                   foreach ($r in $rules.deployment_safety.rules) {
                     if ($r.name -eq 'Missing GO terminator') {
-                      $last = Last-Line $content
+                      $last = Get-LastLine $content
                       if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) {
                         $msg = 'DEPLOYMENT: Missing GO terminator - ' + $r.message
                         if ($r.severity -eq 'error') { $errors += $msg } else { $warnings += $msg }
@@ -489,21 +466,20 @@ jobs:
                   }
                 }
               } else {
-                # Fallback minimal checks
                 if (Test-Pat $content '\bDROP\s+DATABASE\b') { $errors += 'DROP DATABASE detected (CRITICAL - not allowed)' }
                 if (Test-Pat $content '\bTRUNCATE\s+TABLE\b') { $errors += 'TRUNCATE TABLE detected (data loss risk)' }
                 if (Test-Pat $content '\bDROP\s+TABLE\b')     { $warnings += 'DROP TABLE detected' }
-                $last = Last-Line $content
+                $last = Get-LastLine $content
                 if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) { $errors += 'SQL file must end with GO statement' }
               }
 
-              foreach ($w in $warnings) { Write-Host ('    ⚠️  WARNING: ' + $w) -ForegroundColor Yellow; $totalWarnings++ }
+              foreach ($w in $warnings) { Write-Host ('    [WARN] ' + $w) -ForegroundColor Yellow; $totalWarnings++ }
               if ($errors.Count -gt 0) {
-                Write-Host '    ❌ Validation FAILED' -ForegroundColor Red
+                Write-Host '    [FAIL] Validation FAILED' -ForegroundColor Red
                 foreach ($e in $errors) { Write-Host ('       - ' + $e) -ForegroundColor Red; $totalErrors++ }
                 $validationFailed = $true
               } else {
-                Write-Host '    ✅ Validation PASSED' -ForegroundColor Green
+                Write-Host '    [OK] Validation PASSED' -ForegroundColor Green
               }
             }
           }
@@ -515,11 +491,11 @@ jobs:
           Write-Host ('Total errors: ' + $totalErrors)
           Write-Host ('Total warnings: ' + $totalWarnings)
           if ($validationFailed) { 
-            Write-Host 'Status: ❌ FAILED' -ForegroundColor Red
+            Write-Host 'Status: FAILED' -ForegroundColor Red
             Write-Host '========================================='
             throw 'Validation failed' 
           }
-          Write-Host 'Status: ✅ PASSED' -ForegroundColor Green
+          Write-Host 'Status: PASSED' -ForegroundColor Green
           Write-Host '========================================='
 
       - name: Deploy to STAGING (per project)
@@ -545,41 +521,41 @@ jobs:
 
           foreach ($proj in $projects) {
             Write-Host ''
-            Write-Host ('📁 Deploying project: ' + $proj) -ForegroundColor Cyan
-            Write-Host '─────────────────────────────────────────'
+            Write-Host ('Deploying project: ' + $proj) -ForegroundColor Cyan
+            Write-Host '-----------------------------------------'
             $fileList = '_changed_' + $proj + '.txt'
-            if (!(Test-Path $fileList)) { Write-Host '  ⚠️ No file list found, skipping'; continue }
+            if (!(Test-Path $fileList)) { Write-Host '  No file list found, skipping'; continue }
 
             $files = Get-Content $fileList | Sort-Object
             $hasAlter = $false
             foreach ($f in $files) { if ((Get-Content $f -Raw) -match '(?i)\bALTER\s+TABLE\b') { $hasAlter = $true; break } }
-            if ($hasAlter) { Write-Host '  📦 Project contains ALTER - backup recommended' -ForegroundColor Yellow }
+            if ($hasAlter) { Write-Host '  Project contains ALTER - backup recommended' -ForegroundColor Yellow }
 
             foreach ($file in $files) {
               $file = $file.Trim()
               if (!(Test-Path $file)) { 
-                Write-Host ('  ❌ File not found: ' + $file) -ForegroundColor Red
+                Write-Host ('  FAILED: File not found: ' + $file) -ForegroundColor Red
                 throw ('Deployment failed: file not found ' + $file) 
               }
               $fileName = Split-Path $file -Leaf
-              Write-Host ('  🚀 Deploying: ' + $fileName)
+              Write-Host ('  Deploying: ' + $fileName)
 
               $fullPath = Resolve-Path $file
               $args = @('-S', ("{0},{1}" -f $env:H, $PORT), '-d', $env:D, '-U', $env:U, '-P', $env:W, '-b', '-C', '-i', $fullPath)
 
               & $env:SQLCMD_EXE @args
               if ($LASTEXITCODE -ne 0) {
-                Write-Host ('  ❌ FAILED: ' + $fileName + ' (exit ' + $LASTEXITCODE + ')') -ForegroundColor Red
+                Write-Host ('  FAILED: ' + $fileName + ' (exit ' + $LASTEXITCODE + ')') -ForegroundColor Red
                 throw ('Deployment failed for ' + $fileName)
               }
 
-              Write-Host ('  ✅ SUCCESS: ' + $fileName) -ForegroundColor Green
+              Write-Host ('  SUCCESS: ' + $fileName) -ForegroundColor Green
               $totalDeployed++
               $deploymentLog += @{ project=$proj; file=$fileName; status='success'; timestamp=(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') }
             }
 
             $countProj = (($deploymentLog | Where-Object { $_.project -eq $proj }).Count)
-            Write-Host ('  📊 Project "' + $proj + '": deployed ' + $countProj + ' file(s)') -ForegroundColor Cyan
+            Write-Host ('  Project "' + $proj + '": deployed ' + $countProj + ' file(s)') -ForegroundColor Cyan
           }
 
           Write-Host ''
@@ -588,7 +564,7 @@ jobs:
           Write-Host '========================================='
           Write-Host ('Total projects: ' + $projects.Count)
           Write-Host ('Total files deployed: ' + $totalDeployed)
-          Write-Host 'Status: ✅ SUCCESS' -ForegroundColor Green
+          Write-Host 'Status: SUCCESS' -ForegroundColor Green
           Write-Host '========================================='
 
           $deploymentLog | ConvertTo-Json | Set-Content 'deployment_log.json' -Encoding UTF8
