@@ -304,17 +304,17 @@ jobs:
           $totalRules += $normalized.bfi_custom_rules.rules.Count
           $totalRules += $normalized.deployment_safety.rules.Count
 
-          Write-Host "✅ Loaded $totalRules validation rules:"
-          Write-Host "   - CREATE rules: $($normalized.type_guards.create.rules.Count)"
-          Write-Host "   - ALTER rules: $($normalized.type_guards.alter.rules.Count)"
-          Write-Host "   - PROCEDURE rules: $($normalized.type_guards.procedure.rules.Count)"
-          Write-Host "   - Performance checks: $($normalized.performance_checks.rules.Count)"
-          Write-Host "   - Security checks: $($normalized.security_checks.rules.Count)"
-          Write-Host "   - Data integrity: $($normalized.data_integrity.rules.Count)"
-          Write-Host "   - Code quality: $($normalized.code_quality.rules.Count)"
-          Write-Host "   - Custom rules: $($normalized.custom_rules.rules.Count)"
-          Write-Host "   - BFI custom rules: $($normalized.bfi_custom_rules.rules.Count)"
-          Write-Host "   - Deployment safety: $($normalized.deployment_safety.rules.Count)"
+          Write-Host '✅ Loaded $totalRules validation rules:''
+          Write-Host '   - CREATE rules: $($normalized.type_guards.create.rules.Count)'
+          Write-Host '   - ALTER rules: $($normalized.type_guards.alter.rules.Count)'
+          Write-Host '   - PROCEDURE rules: $($normalized.type_guards.procedure.rules.Count)'
+          Write-Host '   - Performance checks: $($normalized.performance_checks.rules.Count)'
+          Write-Host '   - Security checks: $($normalized.security_checks.rules.Count)'
+          Write-Host '   - Data integrity: $($normalized.data_integrity.rules.Count)'
+          Write-Host '   - Code quality: $($normalized.code_quality.rules.Count)'
+          Write-Host '   - Custom rules: $($normalized.custom_rules.rules.Count)'
+          Write-Host '   - BFI custom rules: $($normalized.bfi_custom_rules.rules.Count)'
+          Write-Host '   - Deployment safety: $($normalized.deployment_safety.rules.Count)'
 
           ($normalized | ConvertTo-Json -Depth 50) | Set-Content '_validation_rules.json' -Encoding UTF8
           Add-Content -Path $env:GITHUB_OUTPUT -Value 'rules_loaded=true'
