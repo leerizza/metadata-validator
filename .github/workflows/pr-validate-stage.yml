@@ -372,7 +372,7 @@ jobs:
                     $pat = '' + $r.pattern
                     if ([string]::IsNullOrEmpty($pat)) { continue }
                     if (Test-Pat $content $pat) {
-                      $msg = "$category: " + ('' + $r.name) + ' - ' + ('' + $r.message)
+                      $msg = ("{0}: {1} - {2}" -f $category, ('' + $r.name), ('' + $r.message))
                       if ($r.severity -eq 'error') { $e += $msg } else { $w += $msg }
                     }
                   }
