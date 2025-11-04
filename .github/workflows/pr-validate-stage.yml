@@ -316,7 +316,7 @@ jobs:
           Write-Host "   - BFI custom rules: $($normalized.bfi_custom_rules.rules.Count)"
           Write-Host "   - Deployment safety: $($normalized.deployment_safety.rules.Count)"
 
-          ($normalized | ConvertTo-Json -Depth 50) | Set-Content "_validation_rules.json" -Encoding UTF8
+          ($normalized | ConvertTo-Json -Depth 50) | Set-Content '_validation_rules.json' -Encoding UTF8
           Add-Content -Path $env:GITHUB_OUTPUT -Value 'rules_loaded=true'
 
       - name: Validate SQL files
