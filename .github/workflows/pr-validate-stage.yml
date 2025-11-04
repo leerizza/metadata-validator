@@ -183,9 +183,9 @@ jobs:
               continue
             }
 
-            $kv = $trim -split ":", 2
+            $kv = $trim -split ':', 2
             if ($kv.Count -lt 2) { continue }
-            $key = $kv[0].Trim(" `"`'")
+            $key = $kv[0].Trim(' "`'')
             $val = $kv[1].Trim()
 
             if ($parent.node -is [System.Collections.IList]) {
@@ -194,14 +194,14 @@ jobs:
                 $last = [ordered]@{}
                 [void]$parent.node.Add($last)
               }
-              if ($val -eq "") {
+              if ($val -eq '') {
                 $last[$key] = [ordered]@{}
                 $stack.Push(@{ indent = $indent; node = $last[$key]; key = $key; container = $last })
               } else {
                 $last[$key] = Convert-Scalar $val
               }
             } else {
-              if ($val -eq "") {
+              if ($val -eq '') {
                 $parent.node[$key] = [ordered]@{}
                 $stack.Push(@{ indent = $indent; node = $parent.node[$key]; key = $key; container = $parent.node })
               } else {
