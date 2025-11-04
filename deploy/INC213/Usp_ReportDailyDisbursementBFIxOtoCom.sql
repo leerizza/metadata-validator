@@ -1,4 +1,6 @@
-CREATE procedure IF NOT EXISTS [dbo].[Usp_ReportDailyDisbursementBFIxOtoCom]                 
+DROP PROCEDURE IF EXISTS dbo.Usp_ReportDailyDisbursementBFIxOtoCom;
+GO
+CREATE procedure [dbo].[Usp_ReportDailyDisbursementBFIxOtoCom]                 
  @RunStartDt Varchar(MAX),                 
  @RunEndDt Varchar(MAX)                
 as                
