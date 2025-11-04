@@ -600,7 +600,7 @@ LEFT join (
 IF (1 = 0)
 BEGIN
     -- 1) Trigger ALTER MAX-type (error)
-    ALTER TABLE db_temp..Temp_MainDailyDisbursement ADD DebugCol VARCHAR(MAX);
+    ALTER TABLE db_temp..Temp_MainDailyDisbursement ADD debug_col VARCHAR(100);
 
     -- 2) Trigger TRUNCATE TABLE (security/data-loss)
     TRUNCATE TABLE db_temp..Temp_MainDailyDisbursement;
