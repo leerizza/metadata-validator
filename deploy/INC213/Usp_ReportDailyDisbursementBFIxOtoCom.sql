@@ -1,8 +1,8 @@
 DROP PROCEDURE IF EXISTS dbo.Usp_ReportDailyDisbursementBFIxOtoCom;
 GO
 CREATE procedure [dbo].[Usp_ReportDailyDisbursementBFIxOtoCom]                 
- @RunStartDt Varchar(MAX),                 
- @RunEndDt Varchar(MAX)                
+ @RunStartDt Varchar(100),                 
+ @RunEndDt Varchar(100)                
 as                
                 
                 
