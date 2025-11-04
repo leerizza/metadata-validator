@@ -129,7 +129,7 @@ jobs:
             exit 0
           }
 
-          Write-Host "📋 Loading validation rules from rules.yml..."
+          Write-Host "Loading validation rules from rules.yml..."
 
           function Convert-Scalar($s) {
             if ($null -eq $s) { return "" }
@@ -329,7 +329,7 @@ jobs:
           Write-Host '========================================='
 
           if (!(Test-Path '_validation_rules.json')) {
-            Write-Host '⚠️ Rules not loaded; using basic validation only'
+            Write-Host ' Rules not loaded; using basic validation only'
             $rules = $null
           } else {
             $rules = Get-Content '_validation_rules.json' | ConvertFrom-Json
@@ -351,7 +351,7 @@ jobs:
             $fileList = '_changed_' + $proj + '.txt'
             if (!(Test-Path $fileList)) { continue }
             Write-Host ''
-            Write-Host ('📁 Validating project: ' + $proj)
+            Write-Host (' Validating project: ' + $proj)
             $files = Get-Content $fileList
             foreach ($file in $files) {
               $file = $file.Trim()
