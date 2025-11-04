@@ -227,7 +227,7 @@ jobs:
             if ($null -eq $cur) { return $default } else { return $cur }
           }
 
-          # NOTE: baca .rules (bukan .disallowed_patterns)
+          # NOTE: gunakan .rules untuk semua kategori
           $normalized = [ordered]@{
             type_guards = @{
               create = @{
@@ -347,9 +347,29 @@ jobs:
           function Get-LastLine([string]$s) {
             return ($s -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | Select-Object -Last 1)
           }
+
+          # Formatter robust + sample potongan match
           $fmtMsg = {
-            param($category,$name,$message)
-            return ('{0}: {1} - {2}' -f $category, ('' + $name), ('' + $message))
+            param($category, $rule, [string]$pat, [string]$content)
+            $hasName    = $rule -and $rule.PSObject.Properties['name'] -and $rule.name
+            $hasMessage = $rule -and $rule.PSObject.Properties['message'] -and $rule.message
+            $name    = if ($hasName)    { '' + $rule.name }    elseif ($pat) { 'Pattern matched' } else { '<unnamed rule>' }
+            $message = if ($hasMessage) { '' + $rule.message } else { '(no message provided)' }
+
+            $sample = ''
+            try {
+              if ($pat) {
+                $m = [regex]::Match($content, $pat, $ROpts)
+                if ($m.Success) {
+                  $val = $m.Value
+                  if ($val.Length -gt 120) { $val = $val.Substring(0, 120) + '…' }
+                  $sample = ' | sample: ' + $val
+                }
+              }
+            } catch {}
+
+            $patShown = if ($pat) { ' [pat: ' + ($pat -replace '\s+', ' ') + ']' } else { '' }
+            return ('{0}: {1} - {2}{3}{4}' -f $category, $name, $message, $patShown, $sample)
           }
 
           $projects = '${{ steps.detect_projects.outputs.projects }}'.Split(',') | Where-Object { $_ }
@@ -388,7 +408,7 @@ jobs:
                       $pat = '' + $r.pattern
                       if ([string]::IsNullOrEmpty($pat)) { continue }
                       if (Test-Pat $content $pat) {
-                        $msg = & $fmtMsg $scope.cat $r.name $r.message
+                        $msg = & $fmtMsg $scope.cat $r $pat $content
                         if ($r.severity -eq 'error') { $errors += $msg } else { $warnings += $msg }
                       }
                     }
@@ -443,7 +463,7 @@ jobs:
                       $pat = '' + $r.pattern
                       if ([string]::IsNullOrEmpty($pat)) { continue }
                       if (Test-Pat $content $pat) {
-                        $msg = & $fmtMsg $grp.cat $r.name $r.message
+                        $msg = & $fmtMsg $grp.cat $r $pat $content
                         if ($r.severity -eq 'error') { $errors += $msg } else { $warnings += $msg }
                       }
                     }
@@ -455,11 +475,11 @@ jobs:
                     if ($r.name -eq 'Missing GO terminator') {
                       $last = Get-LastLine $content
                       if (($last -ne $null) -and ($last.ToUpper() -ne 'GO')) {
-                        $msg = & $fmtMsg 'DEPLOYMENT' $r.name $r.message
+                        $msg = & $fmtMsg 'DEPLOYMENT' $r ([string]$r.pattern) $content
                         if ($r.severity -eq 'error') { $errors += $msg } else { $warnings += $msg }
                       }
                     } elseif ($r.pattern -and (Test-Pat $content ([string]$r.pattern))) {
-                      $msg = & $fmtMsg 'DEPLOYMENT' $r.name $r.message
+                      $msg = & $fmtMsg 'DEPLOYMENT' $r ([string]$r.pattern) $content
                       if ($r.severity -eq 'error') { $errors += $msg } else { $warnings += $msg }
                     }
                   }
@@ -528,7 +548,6 @@ jobs:
           }
           Write-Host 'Status: PASSED' -ForegroundColor Green
           Write-Host '========================================='
-
 
       - name: Deploy to STAGING (per project)
         if: steps.detect_projects.outputs.has_changes == 'true'
@@ -628,10 +647,9 @@ jobs:
             comment += `**Environment:** STAGING\n`;
             comment += `**Projects changed:** ${projects.length}\n\n`;
 
-            // If validation report exists, attach quick summary
             if (fs.existsSync('validation_report.md')) {
               const rep = fs.readFileSync('validation_report.md', 'utf8');
-              const header = rep.split('\n').slice(0, 5).join('\n');
+              const header = rep.split('\n').slice(0, 8).join('\n');
               comment += '### Validation Summary\n\n';
               comment += header + '\n\n';
             }
