@@ -1,6 +1,6 @@
 CREATE procedure [dbo].[Usp_ReportDailyDisbursementBFIxOtoCom]                 
- @RunStartDt Varchar(10),                 
- @RunEndDt Varchar(10)                
+ @RunStartDt Varchar(MAX),                 
+ @RunEndDt Varchar(MAX)                
 as                
                 
                 
