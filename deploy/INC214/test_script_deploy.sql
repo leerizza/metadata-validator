@@ -9,7 +9,7 @@ GO
 SET QUOTED_IDENTIFIER ON
 GO
 
-CREATE TABLE [dbo].[stg_test_table_20251105]( 
+CREATE TABLE IF NOT EXISTS [dbo].[stg_test_table_20251105]( 
 	[ID] [int] NOT NULL,
 	[FullName] [varchar](100) NULL,
 	[CancelDate] [datetime] NULL,
