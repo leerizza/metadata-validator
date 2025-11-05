@@ -36,17 +36,18 @@ GO
 
   ALTER TABLE stg_test_table ALTER COLUMN FullName VARCHAR(100) NULL;
   ALTER TABLE stg_test_table ADD  ValueA VARCHAR(100) NULL; 
-  Create view test_table  as  --view without nolock , need validasi
+
+  Create view test_table as 
   select * from stg_test_table 
 
 
-  Create procedure test_table    --Procedure without nolock , need validasi
+  Create procedure test_table 
   as 
   begin 
   select * from stg_test_table 
   end 
 
-  Create procedure test_table2    --Procedure with #TempTable , need validasi
+  Create procedure test_table2 
   as 
   begin 
   select * 
@@ -55,7 +56,7 @@ GO
   end 
 
 
-  Create procedure test_table3    --Procedure with CTE , need validasi
+  Create procedure test_table3
   as 
   begin 
 
