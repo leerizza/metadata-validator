@@ -35,7 +35,7 @@ GO
 
 
   ALTER TABLE stg_test_table ALTER COLUMN FullName VARCHAR(100) NULL;
-  ALTER TABLE stg_test_table ADD  ValueD VARCHAR(100) NULL; 
+  ALTER TABLE stg_test_table ADD  ValueE VARCHAR(100) NULL; 
 GO
   Create view test_table as 
   select * from stg_test_table 
