@@ -35,13 +35,13 @@ GO
 
 
   ALTER TABLE stg_test_table ALTER COLUMN FullName VARCHAR(100) NULL;
-  ALTER TABLE stg_test_table ADD  ValueB VARCHAR(100) NULL; 
+  ALTER TABLE stg_test_table ADD  ValueC VARCHAR(100) NULL; 
 GO
   Create view test_table as 
   select * from stg_test_table 
 GO
 
-  Create procedure test_table 
+  Create procedure test_table
   as 
   begin 
   select * from stg_test_table 
