@@ -1,4 +1,3 @@
--- --Create table with varchar(max) , need validasi
 
 USE [DQ_DEV]
 GO
@@ -33,9 +32,8 @@ GO
 
 
 
-  ALTER TABLE stg_test_table ALTER COLUMN FullName VARCHAR(100) NULL; -- using VARCHAR(max) , need validasi
-  ALTER TABLE stg_test_table add ValueA VARCHAR(100) NULL; --using VARCHAR(max) , need validasi
-
+  ALTER TABLE stg_test_table ALTER COLUMN FullName VARCHAR(100) NULL;
+  ALTER TABLE stg_test_table ADD  ValueA VARCHAR(100) NULL; 
   Create view test_table  as  --view without nolock , need validasi
   select * from stg_test_table 
 
