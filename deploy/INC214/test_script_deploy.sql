@@ -1,70 +1,55 @@
-
-USE [DQ_DEV]
-GO
-
-/****** Object:  Table [dbo].[stg_test_table]    Script Date: 11/5/2025 10:10:04 AM ******/
-SET ANSI_NULLS ON
-GO
-
-SET QUOTED_IDENTIFIER ON
-GO
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'stg_test_table_20251105')
+/* === DDL changes (aman diulang) === */
+IF OBJECT_ID(N'dbo.stg_test_table', N'U') IS NOT NULL
 BEGIN
-CREATE TABLE [dbo].[stg_test_table_20251105]( 
-	[ID] [int] NOT NULL,
-	[FullName] [varchar](100) NULL,
-	[CancelDate] [datetime] NULL,
-	[UnderwritingReturnCumulative] [int] NULL,
-	[TimestampUnderwriting] [datetime] NULL,
-	[ApproveCancelDate] [datetime] NULL,
-	[SLAProspectToAssign] [varchar](36) NULL,
-	[SLAProspectToAssigninSecond] [numeric](17, 2) NULL,
-	[SLA_InputToApprove] [varchar](36) NULL,
-	[SLA_InputToApproveinSecond] [numeric](17, 2) NULL,
-	[SLA_ApprovalDateToGoliveDate] [varchar](36) NULL,
-	[SLAApprovetoGoliveinSecond] [numeric](17, 2) NULL,
-	[BranchInputTimeZone] [varchar](5) NULL,
-	[BranchSurveyTimeZone] [varchar](5) NULL,
-	[BranchBookingTimeZone] [varchar](5) NULL,
-	[RescoringSurveyor] [int] NULL,
-	[RescoringOperation] [int] NULL
-) ON [PRIMARY]
+    IF COL_LENGTH('dbo.stg_test_table', 'FullName') IS NOT NULL
+        ALTER TABLE dbo.stg_test_table ALTER COLUMN FullName NVARCHAR(100) NULL; -- pakai NVARCHAR, bukan VARCHAR(MAX)
+
+    IF COL_LENGTH('dbo.stg_test_table', 'ValueA') IS NULL
+        ALTER TABLE dbo.stg_test_table ADD ValueA NVARCHAR(100) NULL;            -- tambah kolom hanya jika belum ada
 END
 GO
 
-
-
-  ALTER TABLE stg_test_table ALTER COLUMN FullName VARCHAR(100) NULL;
-  ALTER TABLE stg_test_table ADD  ValueE VARCHAR(100) NULL; 
-GO
-  Create view test_table as 
-  select * from stg_test_table 
+/* === VIEW (idempotent) === */
+CREATE OR ALTER VIEW dbo.vw_test_table
+AS
+SELECT *
+FROM dbo.stg_test_table WITH (NOLOCK);   -- kalau kamu mau enforce NOLOCK
 GO
 
-  Create procedure test_table
-  as 
-  begin 
-  select * from stg_test_table 
-  end 
-GO
-  Create procedure test_table2 
-  as 
-  begin 
-  select * 
-  INTO #TempTable
-  from stg_test_table 
-  end 
+/* === Stored procedure 1 (idempotent & rename agar tidak bentrok) === */
+CREATE OR ALTER PROCEDURE dbo.usp_test_table
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT *
+    FROM dbo.stg_test_table WITH (NOLOCK);
+END
 GO
 
-  Create procedure test_table3
-  as 
-  begin 
+/* === Stored procedure 2: temp table === */
+CREATE OR ALTER PROCEDURE dbo.usp_test_table2
+AS
+BEGIN
+    SET NOCOUNT ON;
 
-  with test_table as
-  (
-  select * 
-  from stg_test_table 
-  )
+    SELECT *
+    INTO #TempTable
+    FROM dbo.stg_test_table WITH (NOLOCK);
+END
+GO
 
-  select * from test_table
-  end 
+/* === Stored procedure 3: CTE === */
+CREATE OR ALTER PROCEDURE dbo.usp_test_table3
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    WITH cte AS
+    (
+        SELECT *
+        FROM dbo.stg_test_table WITH (NOLOCK)
+    )
+    SELECT * FROM cte;
+END
+GO
