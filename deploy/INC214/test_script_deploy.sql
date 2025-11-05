@@ -33,8 +33,8 @@ GO
 
 
 
-  ALTER TABLE stg_test_table ALTER COLUMN FullName VARCHAR(max) NULL; -- using VARCHAR(max) , need validasi
-  ALTER TABLE stg_test_table add ValueA VARCHAR(max) NULL; --using VARCHAR(max) , need validasi
+  ALTER TABLE stg_test_table ALTER COLUMN FullName VARCHAR(100) NULL; -- using VARCHAR(max) , need validasi
+  ALTER TABLE stg_test_table add ValueA VARCHAR(100) NULL; --using VARCHAR(max) , need validasi
 
   Create view test_table  as  --view without nolock , need validasi
   select * from stg_test_table 
@@ -55,7 +55,7 @@ GO
   end 
 
 
-    Create procedure test_table3    --Procedure with CTE , need validasi
+  Create procedure test_table3    --Procedure with CTE , need validasi
   as 
   begin 
 
