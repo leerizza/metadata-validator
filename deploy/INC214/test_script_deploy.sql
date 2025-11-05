@@ -12,7 +12,7 @@ GO
 
 CREATE TABLE [dbo].[stg_test_table_20251105]( 
 	[ID] [int] NOT NULL,
-	[FullName] [varchar](max) NULL,
+	[FullName] [varchar](100) NULL,
 	[CancelDate] [datetime] NULL,
 	[UnderwritingReturnCumulative] [int] NULL,
 	[TimestampUnderwriting] [datetime] NULL,
