@@ -36,17 +36,17 @@ GO
 
   ALTER TABLE stg_test_table ALTER COLUMN FullName VARCHAR(100) NULL;
   ALTER TABLE stg_test_table ADD  ValueA VARCHAR(100) NULL; 
-
+GO
   Create view test_table as 
   select * from stg_test_table 
-
+GO
 
   Create procedure test_table 
   as 
   begin 
   select * from stg_test_table 
   end 
-
+GO
   Create procedure test_table2 
   as 
   begin 
@@ -54,7 +54,7 @@ GO
   INTO #TempTable
   from stg_test_table 
   end 
-
+GO
 
   Create procedure test_table3
   as 
